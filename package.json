@@ -1,0 +1,36 @@
+{
+  "name": "contract-retriever-agentic",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Agentic Business Knowledge Assistant — NL question → an agent that navigates a knowledge/ tree, reads the real files (CSV/PDF), and returns a grounded, cited answer with a verifiable trace.",
+  "//": "Every script here is a forcing function. A forcing function is INERT until it is a REQUIRED CI step (.github/workflows/ci.yml). doc-lint + doc-structure-lint are wired real; the agent engine + its gates live in backend/ (Python) and are run by test:agent (validator) + eval:agent (the repeated-N golden eval harness).",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "test:agent": "cd backend && python -m pytest tests/test_validate.py -q",
+    "eval:agent": "cd backend && python -m eval.run",
+    "test:journeys": "playwright test --config=playwright.journeys.config.ts",
+    "doc-lint": "node scripts/doc-lint.mjs",
+    "doc-structure-lint": "node scripts/doc-structure-lint.mjs",
+    "verify:release": "npm run doc-lint && npm run doc-structure-lint && npm run typecheck && npm run test:agent"
+  },
+  "dependencies": {
+    "next": "15.5.19",
+    "react": "19.0.0",
+    "react-dom": "19.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.55.0",
+    "@types/node": "22.10.7",
+    "@types/react": "19.0.7",
+    "@types/react-dom": "19.0.3",
+    "typescript": "5.7.3"
+  },
+  "engines": {
+    "node": ">=22.6"
+  }
+}

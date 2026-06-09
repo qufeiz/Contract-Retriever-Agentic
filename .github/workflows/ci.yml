@@ -1,0 +1,43 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.12"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ── REQUIRED doc immune system (these have teeth) ──────────────────
+      - name: doc-lint (links, references, journey-spec coverage, ledger)
+        run: npm run doc-lint
+      - name: doc-structure-lint (user-guide how-to skeleton)
+        run: npm run doc-structure-lint
+
+      - name: Install JS deps
+        run: npm install
+
+      # ── Code gates: real the moment the toolchain points at real targets ─
+      - name: Typecheck
+        run: npm run typecheck
+
+      # ── Agent gates (Python) ───────────────────────────────────────────
+      # poppler-utils provides pdftotext (the PDF extraction the agent + the
+      # validator's printed-page-label check rely on).
+      - name: Install system deps (pdftotext)
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+      - name: Install Python deps
+        run: pip install -r backend/requirements.txt
+      - name: validateAnswer content-fidelity unit tests
+        run: npm run test:agent
+      # NOTE: the repeated-N golden eval harness (eval:agent) calls the real
+      # Anthropic API and is run with a key as a separate, gated job — it is NOT
+      # part of the keyless push gate. See docs/testing/README.md.
