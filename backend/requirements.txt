@@ -1,5 +1,6 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.0
+python-multipart==0.0.32  # FastAPI multipart/form-data uploads (/api/uploads)
 claude-agent-sdk>=0.1.0
 pydantic>=2.0
 pdfplumber>=0.11.0

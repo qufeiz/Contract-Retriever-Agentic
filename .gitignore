@@ -52,3 +52,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 backend/.env
+
+# live-upload store — client-uploaded files are EPHEMERAL and NEVER committed
+/uploads/

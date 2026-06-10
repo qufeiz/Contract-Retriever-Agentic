@@ -31,7 +31,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -41,9 +41,18 @@ from backend.config import (
     MAX_QUESTION_CHARS,
     RATE_LIMIT_MAX,
     RATE_LIMIT_WINDOW_SEC,
+    UPLOAD_MAX_FILES,
+    UPLOAD_MODEL,
     anthropic_key_present,
 )
 from backend.models import AskRequest, AskResponse, TraceStep
+from backend.uploads import (
+    UploadError,
+    create_session,
+    finalize_session_map,
+    get_session,
+    store_upload,
+)
 
 app = FastAPI(title="Aletheia Agentic API")
 
@@ -114,7 +123,7 @@ def _prune_jobs() -> None:
         _JOBS.pop(jid, None)
 
 
-async def _run_job(job_id: str, question: str) -> None:
+async def _run_job(job_id: str, question: str, session_id: str | None = None) -> None:
     """Background task: run the agent, streaming trace into the job, then store the result."""
     job = _JOBS[job_id]
 
@@ -122,7 +131,13 @@ async def _run_job(job_id: str, question: str) -> None:
         job.trace.append(step)
 
     try:
-        resp = await answer_question(question, on_trace=_on_trace)
+        # An upload run (session present) uses the stronger UPLOAD_MODEL (Sonnet) — Haiku is
+        # unreliable on arbitrary uploaded data (it mis-cited CSV rows); the committed-corpus
+        # path (no session) keeps the default MODEL.
+        model = UPLOAD_MODEL if session_id else None
+        resp = await answer_question(
+            question, on_trace=_on_trace, session_id=session_id, model=model
+        )
         job.result = resp
         job.trace = list(resp.trace)  # the authoritative final trace
         job.status = "done"
@@ -194,7 +209,10 @@ async def ask(req: AskRequest, request: Request):
     if guard is not None:
         return guard
     try:
-        result = await answer_question(question)
+        # An upload run (session present) uses the stronger UPLOAD_MODEL; the committed-corpus path
+        # keeps the default model. Same policy as the async-job path.
+        model = UPLOAD_MODEL if req.session_id else None
+        result = await answer_question(question, session_id=req.session_id, model=model)
         return result
     except ValueError as e:  # input guard tripped inside the agent
         return JSONResponse(status_code=400, content={"error": str(e)})
@@ -207,6 +225,7 @@ async def submit_job(req: AskRequest, request: Request):
     """Async: create a job, start the agent in the background, return the job id immediately.
 
     Returns fast (well under any serverless cap). The caller polls GET /api/ask/jobs/{id}.
+    A `session_id` (from a prior /api/uploads) scopes the run to that session's uploaded files.
     """
     question = (req.question or "").strip()
     guard = _guard_question(question, request)
@@ -216,8 +235,71 @@ async def submit_job(req: AskRequest, request: Request):
     job_id = uuid.uuid4().hex
     _JOBS[job_id] = Job()
     # Fire-and-forget; the task streams trace into the job and stores the result.
-    asyncio.create_task(_run_job(job_id, question))
+    asyncio.create_task(_run_job(job_id, question, session_id=req.session_id))
     return JSONResponse(status_code=202, content={"job_id": job_id, "status": "running"})
+
+
+@app.post("/api/uploads")
+async def upload(request: Request, files: list[UploadFile] = File(...)):
+    """Live file upload: store the client's CSV/PDF/xlsx in a fresh per-session dir, pre-extract
+    PDFs, auto-generate the session map, and return {session_id, files} so the subsequent ask can
+    carry the session_id and the agent answers over the uploaded files.
+
+    Validation (type/size/filename) happens at upload, BEFORE any agent run is spent — a bad file
+    is rejected here with a clear 4xx. The unguessable session_id + the agent's read-only hook
+    (scoped to this session's dir only) are the isolation/hardening boundary; this endpoint just
+    writes the store.
+    """
+    if not anthropic_key_present():
+        return JSONResponse(
+            status_code=503,
+            content={"error": "ANTHROPIC_API_KEY is not configured on the server."},
+        )
+    if _rate_limited(_client_ip(request)):
+        return JSONResponse(
+            status_code=429,
+            content={"error": "Too many requests — please slow down and retry shortly."},
+        )
+    if not files:
+        return JSONResponse(status_code=400, content={"error": "no files uploaded"})
+    if len(files) > UPLOAD_MAX_FILES:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"too many files (max {UPLOAD_MAX_FILES} per session)."},
+        )
+
+    session = create_session()
+    stored = []
+    try:
+        for f in files:
+            data = await f.read()
+            uf = store_upload(session, f.filename or "upload", data)
+            stored.append(uf)
+    except UploadError as e:
+        # A bad file: discard the whole half-built session so a client never half-uploads.
+        from backend.uploads import prune_session_now  # local import to keep config import order
+
+        prune_session_now(session.session_id)
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    finalize_session_map(session)
+    return JSONResponse(
+        status_code=201,
+        content={
+            "session_id": session.session_id,
+            "files": [
+                {
+                    "name": uf.name,
+                    "kind": uf.kind,
+                    "size": uf.size,
+                    "columns": uf.columns,
+                    "pages": uf.pages,
+                    "rows": uf.rows,
+                }
+                for uf in stored
+            ],
+        },
+    )
 
 
 @app.get("/api/ask/jobs/{job_id}")

@@ -109,11 +109,43 @@ def _norm_rowkey(raw: str) -> str:
     return raw.strip()
 
 
+def _resolve_under_roots(file: str, roots: list[Path]) -> tuple[Path | None, str | None]:
+    """Resolve a cited `file` under the FIRST allowed root that contains it.
+
+    Returns (resolved_path, None) on success, or (None, reason) when the file
+    either escapes every root (a `..`/absolute path that climbs out) or does not
+    exist under any. The roots are tried in order; for the live-upload feature the
+    caller passes [session_uploads_root, knowledge_root] so an uploaded-file
+    citation (e.g. `customers.csv`) resolves against the session dir while a
+    `knowledge/...` citation still resolves against the committed tree.
+    """
+    escaped_all = True
+    for root in roots:
+        root_r = root.resolve()
+        full = (root_r / file).resolve()
+        if not str(full).startswith(str(root_r)):
+            continue  # escapes THIS root — try the next
+        escaped_all = False
+        if full.exists():
+            return full, None
+    if escaped_all:
+        return None, f"cited file escapes the allowed roots: {file}"
+    return None, f"cited file does not exist: {file}"
+
+
 def validate(
     answer: str,
     evidence: list[EvidenceItem],
-    kb_root: Path,
+    kb_root: Path | list[Path],
 ) -> tuple[bool, list[str]]:
+    """Validate every [F:file#loc] token against one or more allowed source roots.
+
+    `kb_root` is a single Path (the committed knowledge/ tree — the original,
+    unchanged behavior) OR a list of roots (the live-upload path: the per-session
+    uploads root FIRST, then knowledge/). A token resolves if the cited file exists
+    under one of the roots and the page/row is in bounds there.
+    """
+    roots = kb_root if isinstance(kb_root, list) else [kb_root]
     reasons: list[str] = []
     tokens = extract_tokens(answer)
 
@@ -128,13 +160,10 @@ def validate(
             reasons.append(f"cited [F:{file}#{loc}] has no matching evidence item")
             continue
 
-        # 3. file must exist under the knowledge tree
-        full = (kb_root / file).resolve()
-        if not str(full).startswith(str(kb_root.resolve())):
-            reasons.append(f"cited file escapes knowledge root: {file}")
-            continue
-        if not full.exists():
-            reasons.append(f"cited file does not exist: {file}")
+        # 3. file must exist under one of the allowed roots
+        full, reason = _resolve_under_roots(file, roots)
+        if full is None:
+            reasons.append(reason or f"cited file does not exist: {file}")
             continue
 
         # 4. bounds-check the locator

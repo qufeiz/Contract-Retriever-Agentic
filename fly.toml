@@ -13,6 +13,9 @@ primary_region = "iad"
 [env]
   PORT = "8080"
   AGENT_MODEL = "claude-haiku-4-5"
+  # The live-upload path escalates to Sonnet (Haiku mis-cited uploaded CSV rows off by one); the
+  # committed-corpus path stays on AGENT_MODEL above.
+  UPLOAD_MODEL = "claude-sonnet-4-6"
   AGENT_MAX_TURNS = "40"
   # CORS is set to the Vercel demo origin via the ALLOWED_ORIGINS secret/env at deploy.
 

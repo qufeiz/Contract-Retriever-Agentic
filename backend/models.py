@@ -13,6 +13,10 @@ from pydantic import BaseModel, Field
 
 class AskRequest(BaseModel):
     question: str
+    # Optional live-upload session: when present, the agent run is scoped to ALSO read
+    # that session's uploaded files (in addition to the committed knowledge/ tree). Absent
+    # → the committed-corpus path, unchanged.
+    session_id: str | None = None
 
 
 class EvidenceItem(BaseModel):

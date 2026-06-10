@@ -14,6 +14,17 @@ type AnswerResult = {
   validation: { ok: boolean; reasons: string[] };
 };
 
+// One uploaded file, as the backend describes it after /api/uploads. `columns`/`rows`
+// are set for CSV/xlsx; `pages` for PDF — shown so the user sees what the agent will read.
+type UploadedFile = {
+  name: string;
+  kind: "csv" | "pdf" | "xlsx";
+  size: number;
+  columns: string[];
+  pages: number | null;
+  rows: number | null;
+};
+
 // Per-feature entry points — color-coded so the surface reads as "many capabilities".
 const EXAMPLES: { feat: string; chip: string; q: string }[] = [
   {
@@ -63,6 +74,8 @@ const fileLabel = (file: string) => file.split("/").pop() ?? file;
 const locLabel = (loc: string) => {
   const p = loc.match(/^p(\d+)$/i);
   if (p) return `page ${p[1]}`;
+  const ord = loc.match(/^row-(\d+)$/i); // uploaded CSV/xlsx ordinal row
+  if (ord) return `row ${ord[1]}`;
   const r = loc.match(/^row=(.+)$/);
   if (r) return `row ${r[1]}`;
   return loc;
@@ -85,7 +98,45 @@ export default function Home() {
   const [activeCite, setActiveCite] = useState<string | null>(null);
   // The live agent trace while a job is running (streamed via polling).
   const [liveTrace, setLiveTrace] = useState<TraceStep[]>([]);
+  // Live-upload session: the files the user uploaded + the session_id carried on the ask.
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [uploads, setUploads] = useState<UploadedFile[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const sourcesRef = useRef<HTMLDivElement>(null);
+
+  // Send the chosen files to the backend → get back a session_id + the parsed file list.
+  // The subsequent ask carries that session_id so the agent reads the uploaded files.
+  async function uploadFiles(files: FileList | File[]) {
+    const list = Array.from(files);
+    if (list.length === 0) return;
+    setUploading(true);
+    setUploadError(null);
+    try {
+      const fd = new FormData();
+      for (const f of list) fd.append("files", f, f.name);
+      const res = await fetch("/api/uploads", { method: "POST", body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "upload failed");
+      setSessionId(data.session_id as string);
+      setUploads(data.files as UploadedFile[]);
+    } catch (e) {
+      setUploadError(e instanceof Error ? e.message : "upload failed");
+      setSessionId(null);
+      setUploads([]);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  function clearUploads() {
+    setSessionId(null);
+    setUploads([]);
+    setUploadError(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
 
   async function ask(q: string) {
     setLoading(true);
@@ -94,11 +145,12 @@ export default function Home() {
     setActiveCite(null);
     setLiveTrace([]);
     try {
-      // 1. Submit the question → get a job id back immediately (under the cap).
+      // 1. Submit the question → get a job id back immediately (under the cap). When the
+      // user has uploaded files, the session_id rides along so the agent reads them.
       const submit = await fetch("/api/ask/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: q }),
+        body: JSON.stringify(sessionId ? { question: q, session_id: sessionId } : { question: q }),
       });
       const job = await submit.json();
       if (!submit.ok) throw new Error(job.error ?? "request failed");
@@ -206,6 +258,82 @@ export default function Home() {
           {loading ? <span className="spinner" /> : "Ask"}
         </button>
       </form>
+
+      {/* Live upload: drop your own CSV/PDF/xlsx, then ask a question over them. The agent
+          reads the uploaded files (per-session, isolated, read-only) the same way it reads the
+          committed knowledge base — citing every claim to a file + page/row. */}
+      <div className="upload-zone" data-testid="upload-zone">
+        <div
+          className={`dropzone${dragOver ? " over" : ""}${uploads.length ? " has-files" : ""}`}
+          data-testid="dropzone"
+          onClick={() => fileInputRef.current?.click()}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragOver(true);
+          }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragOver(false);
+            if (e.dataTransfer.files?.length) uploadFiles(e.dataTransfer.files);
+          }}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && fileInputRef.current?.click()}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,.pdf,.xlsx"
+            multiple
+            hidden
+            data-testid="file-input"
+            onChange={(e) => e.target.files && uploadFiles(e.target.files)}
+          />
+          {uploading ? (
+            <span className="dz-line">
+              <span className="spinner" /> Uploading &amp; preparing your files…
+            </span>
+          ) : (
+            <span className="dz-line">
+              <b>Upload your own data</b> — drop a CSV, PDF, or Excel file here (or click), then ask a
+              question over it. Your files stay private to this session.
+            </span>
+          )}
+        </div>
+
+        {uploadError && (
+          <p className="err" data-testid="upload-error">
+            {uploadError}
+          </p>
+        )}
+
+        {uploads.length > 0 && (
+          <div className="uploaded-files" data-testid="uploaded-files">
+            <div className="uf-head">
+              <span>
+                {uploads.length} file{uploads.length === 1 ? "" : "s"} ready — your next question is
+                answered over {uploads.length === 1 ? "it" : "them"}.
+              </span>
+              <button className="uf-clear" onClick={clearUploads} data-testid="clear-uploads">
+                clear
+              </button>
+            </div>
+            <ul>
+              {uploads.map((f) => (
+                <li key={f.name} className={`uf ${f.kind}`} data-testid={`uploaded-${f.name}`}>
+                  <span className="uf-name">{f.name}</span>
+                  <span className="uf-meta">
+                    {f.kind === "pdf"
+                      ? `${f.pages ?? "?"} page${f.pages === 1 ? "" : "s"}`
+                      : `${f.rows ?? "?"} rows · ${f.columns.length} cols`}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
 
       {!result && !loading && !error && (
         <>

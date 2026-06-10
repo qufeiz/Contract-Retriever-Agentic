@@ -1,0 +1,11 @@
+customer,invoice_id,amount_due,invoice_date,due_date,status
+Northwind Traders,INV-1042,4820.00,2026-03-01,2026-03-31,paid
+Northwind Traders,INV-1071,6200.00,2026-04-15,2026-05-15,unpaid
+Contoso Ltd,INV-1055,3175.50,2026-03-20,2026-04-19,unpaid
+Contoso Ltd,INV-1088,1990.00,2026-05-02,2026-06-01,unpaid
+Fabrikam Inc,INV-1063,9450.75,2026-04-01,2026-05-01,paid
+Fabrikam Inc,INV-1090,2310.00,2026-05-10,2026-06-09,unpaid
+Adatum Corp,INV-1077,7600.00,2026-04-22,2026-05-22,unpaid
+Tailspin Toys,INV-1081,1250.00,2026-05-05,2026-06-04,paid
+Wingtip Supplies,INV-1099,540.00,2026-05-28,2026-06-27,unpaid
+Litware Group,INV-1102,8800.00,2026-06-01,2026-07-01,unpaid
