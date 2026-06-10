@@ -174,7 +174,12 @@ async def ready():
             status_code=503,
             content={"ready": False, "reason": "ANTHROPIC_API_KEY is not configured."},
         )
-    ok, reason = await probe_agent_ready()
+    # Run in a detached task, not inline in the request: the readiness probe's fallback (a direct
+    # `claude -p` to recover the real reason) spawns a subprocess right after the SDK's child failed,
+    # which the in-request uvloop task can silently no-op on. A standalone task gets a clean
+    # child-watcher context — the same reason the async-job path (_run_job, itself a create_task)
+    # reliably surfaces "Credit balance is too low".
+    ok, reason = await asyncio.create_task(probe_agent_ready())
     return JSONResponse(
         status_code=200 if ok else 503,
         content={"ready": ok, "reason": reason},
