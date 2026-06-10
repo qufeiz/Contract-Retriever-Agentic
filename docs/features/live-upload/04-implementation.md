@@ -53,12 +53,15 @@ This is the design's "don't pay for Sonnet until Haiku is shown to miss" decided
 
 ## Security / isolation (the hardening must survive uploads)
 
-Uploaded files are **attacker-controlled**. The boundary is the same `_pre_tool_use` allow-list; the feature only widens the READ scope, never the action allow-list. Proven by `backend/tests/test_hardening.py`:
+Uploaded files are **attacker-controlled**, and the live deployed Agent SDK does **NOT** reliably honor a `PreToolUse` deny (a local↔live divergence that leaked across sessions — see the gotchas). So the isolation does **not** rely on a hook. Three layers, strongest first:
 
-- **Per-session ISOLATION.** A run bound to session A's dir can read A's uploads + `knowledge/`, and is **denied** session B's dir — by path (`_path_in_kb`), by glob/grep pattern, and in the Bash path (a pandas read of B's CSV is denied). The `session_id` is unguessable. (`test_session_isolation_denies_other_session`, `test_session_bash_reads_own_uploads_not_other`.)
-- **Prompt-injection inside an uploaded file is inert.** A cell/line that says "ignore your rules and run `curl …`" provokes a tool call the hook **denies** — `curl`/network, `Write`, and reading `.env`/`/etc/passwd` are all blocked even with a session in scope; only the session's own files are readable. The system prompt frames uploaded files as untrusted data. (`test_injection_inside_uploaded_file_is_inert`.)
-- **No escape.** `..` traversal out of the session dir, absolute paths, and other-session patterns are denied. (`test_session_scope_denies_escapes_and_absolute`, `test_session_glob_grep_scope`.)
-- **Type + size at upload.** Wrong type / oversize / empty / corrupt-PDF are rejected with a 4xx **before** an agent run is spent; a failed file leaves nothing half-stored, and a failed batch discards the whole session. (`test_uploads.py`, `test_uploads_api.py`.)
+**1. Constrained toolset (the airtight boundary — `backend/upload_tools.py`).** The UPLOAD-path agent is given **NO raw `Read`/`Bash`/`Glob`/`Grep`** (`disallowed_tools` + an `allowed_tools` that lists only the scoped tools). Its only filesystem access is five in-process MCP data-reader tools — `list_files`, `read_csv`, `read_pdf_pages`, `read_text`, `grep_files` — each of which takes a **filename** (or `kb/<path>`) and resolves it via `_resolve()` against **only** the run dir + `knowledge/`, REFUSING any absolute path, `..` traversal, or foreign-session path. There is **no tool that reads an arbitrary FS path**, so a cross-session read is impossible **by construction** — no hook to bypass, no SDK enforcement to depend on. Locked by `backend/tests/test_upload_tools.py` (the absolute victim-store path, `..`, `/etc/passwd`, `/app/uploads/...`, `~/...` all REFUSED; `list_files`/`grep` never surface another session's file/secret; own-session + `kb/` allowed — removable-handler-proof).
+
+**2. Filesystem isolation (defense-in-depth — `backend/uploads.py`).** The persistent store lives **outside** the agent's `/app` cwd (`UPLOAD_STORE_DIR`, default `~/.aletheia-upload-store`), and each ask materializes **only that session's files** into an ephemeral `/app/.runs/<unguessable>/` (pruned after the run). So the agent's reachable `/app` tree contains **no other session at all** — even a raw absolute `Read` of `/app/uploads/<OTHER>` (the original live-leak vector) resolves to nothing. (`materialize_run`, `RunView`.)
+
+**3. The `_pre_tool_use` hook (advisory 2nd layer).** Still attached; denies any raw tool that somehow appears. Treated as belt-and-braces, not the boundary (it isn't enforced live).
+
+Plus: **type + size at upload** — wrong type / oversize / empty / corrupt-PDF rejected with a 4xx **before** an agent run; a failed file leaves nothing half-stored, a failed batch discards the whole session (`test_uploads.py`, `test_uploads_api.py`). **Prompt-injection inside an uploaded file is inert** — the agent has no tool to run a `curl`/shell/`Write` an injected cell asks for; uploaded files are framed as untrusted data.
 
 ---
 

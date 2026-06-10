@@ -16,6 +16,20 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 KB_PATH = PROJECT_ROOT / "knowledge"
 
+# ── Live-upload filesystem isolation (defense-in-depth, not hook-dependent) ──
+# The persistent upload store lives OUTSIDE the agent's cwd (PROJECT_ROOT/=/app on Fly),
+# so the agent's reachable /app tree contains NO session dirs at all — a cross-session
+# absolute Read like `/app/uploads/<OTHER>` simply does not resolve, regardless of whether
+# the SDK honors the PreToolUse deny. Each ask materializes ONLY the current session's files
+# into a fresh per-request RUN dir under the cwd; that run dir is the only uploads view the
+# agent ever sees, and it's pruned after the run. Override with UPLOAD_STORE_DIR.
+UPLOAD_STORE_DIR = Path(
+    os.environ.get("UPLOAD_STORE_DIR", str(Path.home() / ".aletheia-upload-store"))
+).resolve()
+# Per-request isolated run dirs live here, UNDER the agent cwd (so the agent can reach the
+# current run by a relative path) but each holds exactly one session's files — never a sibling.
+UPLOAD_RUN_DIR = (PROJECT_ROOT / ".runs").resolve()
+
 # Default model: capable + cost-reasonable. Cheap sub-steps can override.
 MODEL = os.environ.get("AGENT_MODEL", "claude-haiku-4-5")
 

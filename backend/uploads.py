@@ -41,13 +41,16 @@ from backend.config import (
     UPLOAD_MAX_FILE_BYTES,
     UPLOAD_MAX_SESSION_BYTES,
     UPLOAD_MAX_FILES,
+    UPLOAD_RUN_DIR,
+    UPLOAD_STORE_DIR,
     UPLOAD_TTL_SEC,
 )
 
-# The store root. Lives under the project root so the agent (cwd=PROJECT_ROOT) can reach a
-# session dir via `add_dirs`, but it is OUTSIDE `knowledge/` so the committed corpus stays
-# untouched. Gitignored — uploaded client data is never committed.
-UPLOADS_ROOT = PROJECT_ROOT / "uploads"
+# The PERSISTENT upload store lives OUTSIDE the agent's cwd (PROJECT_ROOT/=/app on Fly). This is
+# the filesystem-isolation boundary: the agent's reachable /app tree has NO session dirs, so a
+# cross-session absolute Read like `/app/uploads/<OTHER>` simply does not resolve — even if the
+# SDK ignores the PreToolUse deny (which it does, live). Gitignored + never under /app.
+UPLOADS_ROOT = UPLOAD_STORE_DIR
 
 # Accepted upload types, keyed by lowercased extension. CSV + PDF + xlsx per the approved
 # design (the kb-retriever skill already has a pandas/excel path). Anything else is rejected
@@ -296,6 +299,64 @@ def session_root(session_id: str | None) -> Path | None:
     if s is None:
         return None
     return s.dir.resolve()
+
+
+@dataclass
+class RunView:
+    """An ISOLATED per-request filesystem view of ONE session's uploads, under the agent's cwd.
+
+    The agent runs against this dir (relative path `.runs/<token>/`), which contains ONLY the
+    current session's files — never a sibling session's. The persistent store lives OUTSIDE the
+    agent's cwd (UPLOAD_STORE_DIR), so the agent's reachable /app tree has no other session at all.
+    This is the filesystem-isolation boundary that holds even if the SDK ignores the PreToolUse
+    deny. The dir is removed when the run ends (use as a context manager)."""
+
+    path: Path  # the isolated run dir (resolved, under PROJECT_ROOT/.runs)
+    rel: str  # the run dir relative to PROJECT_ROOT, e.g. ".runs/<token>"
+    file_names: list[str]
+
+    def __enter__(self) -> "RunView":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        shutil.rmtree(self.path, ignore_errors=True)
+
+
+def materialize_run(session_id: str | None) -> RunView | None:
+    """Build a fresh, isolated run dir holding ONLY this session's files, or None.
+
+    Copies the session's stored files (CSV/PDF/.txt/map) from the persistent store (outside the
+    agent cwd) into `PROJECT_ROOT/.runs/<unguessable>/`. The agent is pointed at THIS dir, so the
+    only uploads it can reach are the current session's — a sibling session is physically absent
+    from its filesystem view. Returns None for an unknown/expired session (no upload scope).
+    """
+    if not session_id:
+        return None
+    s = get_session(session_id)
+    if s is None or not s.dir.exists():
+        return None
+    UPLOAD_RUN_DIR.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_urlsafe(18)
+    run_path = (UPLOAD_RUN_DIR / token).resolve()
+    # Copy the whole session dir's contents (the uploaded artifacts + pre-extracted .txt + the
+    # auto-generated data_structure.md) into the isolated run dir. copytree gives a clean, separate
+    # tree; the persistent store is untouched.
+    shutil.copytree(s.dir, run_path)
+    rel = str(run_path.relative_to(PROJECT_ROOT))
+    return RunView(path=run_path, rel=rel, file_names=[f.name for f in s.files])
+
+
+def prune_run_dirs(max_age_sec: int = 1800) -> None:
+    """Best-effort sweep of orphaned run dirs (e.g. from a crashed run) older than max_age_sec."""
+    if not UPLOAD_RUN_DIR.exists():
+        return
+    now = time.time()
+    for child in UPLOAD_RUN_DIR.iterdir():
+        try:
+            if child.is_dir() and now - child.stat().st_mtime > max_age_sec:
+                shutil.rmtree(child, ignore_errors=True)
+        except Exception:
+            pass
 
 
 def store_upload(session: Session, raw_filename: str, data: bytes) -> UploadedFile:
