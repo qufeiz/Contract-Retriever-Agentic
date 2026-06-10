@@ -42,15 +42,23 @@ def test_real_stderr_empty_is_empty_string():
     assert agent._real_stderr(["\n", "   "]) == ""
 
 
-def _fake_query_that_dies(stderr_text: str):
-    """A drop-in for claude_agent_sdk.query: feed the real stderr through the
-    options.stderr callback (as the live CLI does), then raise the SDK's opaque
-    ProcessError with the placeholder it actually uses."""
+def _fake_query_that_dies(stderr_text: str, *, bare: bool = False):
+    """A drop-in for claude_agent_sdk.query: feed any stderr through the options.stderr
+    callback (as the live CLI does), then raise the way the SDK actually does.
+
+    The SDK raises a dead CLI INCONSISTENTLY: sometimes a typed ProcessError, sometimes a
+    bare Exception("Command failed with exit code 1 … Check stderr output for details") from
+    its message reader (the path that actually fired in prod). `bare=True` reproduces the latter."""
 
     async def _gen(*, prompt, options):
         if options.stderr is not None:
             for line in stderr_text.splitlines():
                 options.stderr(line)
+        if bare:
+            raise Exception(
+                "Command failed with exit code 1 (exit code: 1)\n"
+                "Error output: Check stderr output for details"
+            )
         raise ProcessError(
             "Command failed with exit code 1",
             exit_code=1,
@@ -71,7 +79,6 @@ def test_answer_question_surfaces_credit_reason(monkeypatch):
     # the REAL reason is surfaced — not the SDK's opaque placeholder
     assert "Credit balance is too low" in msg
     assert "Check stderr output for details" not in msg
-    assert "exit 1" in msg  # the exit code is still recorded for the operator
 
 
 def test_answer_question_surfaces_auth_reason(monkeypatch):
@@ -83,6 +90,31 @@ def test_answer_question_surfaces_auth_reason(monkeypatch):
         asyncio.run(agent.answer_question("anything"))
 
     assert "401 unauthorized" in str(ei.value)
+
+
+def test_answer_question_recovers_from_bare_wrapper_exception(monkeypatch):
+    # The path that actually fired in prod: the SDK raises a BARE Exception (not ProcessError)
+    # carrying only the opaque wrapper, and the real reason is on stdout. We must still recover it.
+    monkeypatch.setattr(agent, "query", _fake_query_that_dies("", bare=True))
+
+    async def fake_probe():
+        return "Credit balance is too low"
+
+    monkeypatch.setattr(agent, "_probe_cli_failure_reason", fake_probe)
+
+    with pytest.raises(RuntimeError) as ei:
+        asyncio.run(agent.answer_question("anything"))
+
+    msg = str(ei.value)
+    assert "Credit balance is too low" in msg
+    assert "Check stderr output for details" not in msg
+
+
+def test_input_guard_error_is_not_wrapped(monkeypatch):
+    # A ValueError from the input guard is intentional and must propagate as-is (not become a
+    # generic "agent CLI failed"). No query call should happen.
+    with pytest.raises(ValueError):
+        asyncio.run(agent.answer_question("   "))  # empty after strip
 
 
 def test_answer_question_falls_back_to_stdout_probe_when_stderr_empty(monkeypatch):

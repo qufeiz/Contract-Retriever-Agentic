@@ -507,6 +507,28 @@ async def _probe_cli_failure_reason() -> str:
     return _real_stderr(text.splitlines())
 
 
+_OPAQUE_WRAPPER = "check stderr output for details"
+
+
+async def _recover_failure_reason(exc: Exception, stderr_lines: list[str]) -> str:
+    """Best available human reason for an agent-run failure.
+
+    The SDK reports a failed `claude` exit inconsistently — sometimes a typed `ProcessError`,
+    sometimes a bare `Exception("Command failed with exit code 1 … Check stderr output for details")`
+    raised from the message reader — and in BOTH cases the real reason is missing (it went to the
+    CLI's stdout, which the SDK ate). So: prefer any real captured stderr; else, if the exception is
+    just the opaque wrapper, recover the reason via a direct stdout probe; else use the exception text.
+    """
+    captured = _real_stderr(stderr_lines)
+    if captured:
+        return captured
+    if _OPAQUE_WRAPPER in str(exc).lower():
+        probed = await _probe_cli_failure_reason()
+        if probed:
+            return probed
+    return str(exc) or "agent run failed"
+
+
 async def probe_agent_ready() -> tuple[bool, str]:
     """A real readiness check: can the `claude` CLI actually complete a minimal turn?
 
@@ -532,11 +554,8 @@ async def probe_agent_ready() -> tuple[bool, str]:
         ):
             if isinstance(message, ResultMessage):
                 saw_result = True
-    except ProcessError as e:
-        reason = _real_stderr(stderr_lines) or await _probe_cli_failure_reason()
-        return False, reason or f"agent CLI failed (exit {e.exit_code})"
-    except Exception as e:  # any other failure → not ready, surface it
-        return False, _real_stderr(stderr_lines) or str(e)
+    except Exception as e:  # ProcessError OR a bare wrapper Exception — recover the real reason
+        return False, await _recover_failure_reason(e, stderr_lines)
     if not saw_result:
         return False, _real_stderr(stderr_lines) or "agent produced no result"
     return True, "ok"
@@ -606,11 +625,13 @@ async def answer_question(
                             await _emit(TraceStep(kind="note", detail=f"reasoning: {t[:200]}"))
             elif isinstance(message, ResultMessage):
                 result_text = message.result
-    except ProcessError as e:
-        # Surface the real reason the CLI died (the SDK hid it behind a placeholder). The reason
-        # is usually on the CLI's STDOUT, which the SDK ate, so fall back to a direct probe.
-        detail = _real_stderr(stderr_lines) or await _probe_cli_failure_reason() or "no detail captured"
-        raise RuntimeError(f"agent CLI failed (exit {e.exit_code}): {detail}") from e
+    except ValueError:
+        raise  # input-guard errors are intentional — let them propagate as-is
+    except Exception as e:
+        # The SDK reports a dead CLI as either a ProcessError or a bare Exception, both hiding the
+        # real reason (it went to the CLI's stdout, which the SDK ate). Recover + surface it.
+        detail = await _recover_failure_reason(e, stderr_lines)
+        raise RuntimeError(f"agent CLI failed: {detail}") from e
 
     if not result_text:
         # The CLI exited 0 but produced no result message — surface any stderr it left.

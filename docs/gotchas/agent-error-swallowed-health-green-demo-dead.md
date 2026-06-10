@@ -37,11 +37,16 @@ build looked live and was not.
 **Fixes (both in this repo):**
 
 - **Surface the real reason.** `backend/agent.py::answer_question` registers a `stderr` collector
-  and, on `ProcessError`, re-raises `RuntimeError(f"agent CLI failed (exit {code}): {real_reason}")`.
-  `_real_stderr()` distils captured stderr (preferring a credit/auth/quota signal line); when stderr
-  is empty (the out-of-credit case), `_probe_cli_failure_reason()` runs one direct `claude -p` and
-  reads its **stdout** for the real line. The async job's `error` field and the sync `/api/ask` 500
-  now carry the actionable reason.
+  and catches the agent run broadly (`_recover_failure_reason`), re-raising
+  `RuntimeError(f"agent CLI failed: {real_reason}")`. **Catch `Exception`, not just `ProcessError`:**
+  the SDK reports a dead CLI INCONSISTENTLY — sometimes a typed `ProcessError`, but on the path that
+  actually fired in prod a **bare `Exception("Command failed … Check stderr output for details")`**
+  raised from its message reader (`query.py` `raise Exception(...)`). A `ProcessError`-only handler
+  silently misses the bare case. `_real_stderr()` distils any captured stderr (preferring a
+  credit/auth/quota signal line); when that's empty and the exception is the opaque wrapper,
+  `_probe_cli_failure_reason()` runs one direct `claude -p` and reads its **stdout** for the real
+  line. (Input-guard `ValueError`s are re-raised as-is, not wrapped.) The async job's `error` field
+  and the sync `/api/ask` 500 now carry the actionable reason.
 - **A real readiness probe.** `backend/agent.py::probe_agent_ready` runs ONE minimal no-tool agent
   turn; `GET /ready` returns `200 {ready:true}` only when it completes, else `503 {ready:false,
   reason:"…"}`. **"Declare live" must gate on a real golden completing end-to-end + `/ready:true`,
