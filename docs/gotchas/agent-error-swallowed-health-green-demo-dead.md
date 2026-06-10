@@ -1,14 +1,17 @@
 # A green `/health` shipped a dead demo: the Agent SDK swallows the real CLI error ("Credit balance is too low")
 
-> **Confirmation status: PARTIALLY SEALED (2026-06-10).** The two CODE fixes are tested + locked:
-> (1) `answer_question` now re-raises the REAL CLI failure reason instead of the SDK's opaque
-> wrapper, and (2) a `/ready` probe runs one real agent turn so a dead key can't pass as ready —
-> both verified by `backend/tests/test_error_surfacing.py` (5 tests, no agent run spent) and the
-> live root cause was confirmed by running `claude -p` directly inside the Fly machine (it printed
-> `Credit balance is too low`, which the SDK had hidden behind `exit code 1`). **OPEN until** the
-> deployed key is topped up / rotated and ONE real golden + `/ready: true` is observed live — the
-> ROOT CAUSE (out-of-credit key) is a user/billing action, not a code change. Re-seal fully once
-> `/ready` returns `{ready:true}` and a golden answers end-to-end on the public URL.
+> **Confirmation status: PARTIALLY SEALED (2026-06-10).** Verified live against the deployed app:
+> (1) the **async-job error reliably surfaces the REAL reason** — `agent CLI failed: Credit balance
+> is too low` (the user-facing demo surface), and (2) **`/ready` returns `503 {ready:false}`** so a
+> dead key can NOT pass as ready (the readiness GATE works). Both code fixes are locked by
+> `backend/tests/test_error_surfacing.py` (9 tests, no agent run spent); root cause confirmed by
+> running `claude -p` directly in the Fly machine (printed `Credit balance is too low`, which the SDK
+> hid behind `exit code 1`). **KNOWN GAP:** the `/ready` *reason string* still shows the opaque
+> wrapper instead of the credit detail — its in-request fallback subprocess no-ops under uvicorn's
+> uvloop in a way the detached async-job path doesn't (the GATE is right, the detail isn't). **OPEN
+> until** (a) the deployed key is topped up / rotated (a user/billing action, not code) and ONE real
+> golden + `/ready:true` is observed live, and (b) the `/ready` reason-string gap is closed. Re-seal
+> fully then.
 
 ## Lesson (read this first)
 
@@ -51,6 +54,9 @@ build looked live and was not.
   turn; `GET /ready` returns `200 {ready:true}` only when it completes, else `503 {ready:false,
   reason:"…"}`. **"Declare live" must gate on a real golden completing end-to-end + `/ready:true`,
   not on `/health` + screenshots.** `/health` stays as cheap liveness; `/ready` is the real gate.
+  (Known gap: the `503` verdict is reliable; the in-request `reason` string still shows the opaque
+  wrapper because its fallback subprocess no-ops under uvloop — the async-job error string, which
+  IS reliable, is the surface to trust for the human-readable reason. Tracked as OPEN above.)
 
 **General rule:** when a wrapper library reports a generic failure, find where it captured the
 underlying stderr/stdout and surface THAT; and never let a presence check stand in for a real
