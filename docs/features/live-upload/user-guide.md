@@ -15,6 +15,8 @@ The committed demo answers questions over a fixed knowledge base. **Live upload*
 
 Reach for this when you want a **defensible, cited** answer over data you control — for example: *"Which of my customers are overdue, and what does my contract say about suspending them?"*
 
+![Two uploaded files (customers.csv, service-agreement.pdf) and the cross-source answer — 3 customers / $18,965.50 overdue, each cited to a CSV row, the §4.3 suspension clause cited to the contract page — with the green Grounded badge and the agent trace.](images/u1-upload-cross-source-answer.png)
+
 ## 1. Upload your files
 
 In the demo, drop your files onto the **upload area** (or click it to pick them). Accepted types are **CSV, PDF, and Excel (`.xlsx`)**.

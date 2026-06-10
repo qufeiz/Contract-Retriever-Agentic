@@ -175,6 +175,37 @@ def test_session_bash_reads_own_uploads_not_other():
         assert not agent._bash_is_readonly_kb("cat uploads/SESSION_A/customers.csv > /tmp/leak")
 
 
+def test_bash_cannot_read_another_session_even_if_it_names_its_own():
+    """REGRESSION (the live cross-session leak the verifier caught): a Bash command that references
+    THIS session's dir but ALSO reads ANOTHER session's dir must be DENIED. The old scope check only
+    asked 'does the command MENTION an allowed root?' (a loose substring), which let a command name
+    its own session and still read a foreign one — the actual live leak vector. Every named path must
+    now be in scope. Removable-handler-proof: revert the per-path check and these go green-when-leaking."""
+    with _session_scope(_SA):
+        # reads its OWN dir AND session B's dir in one pandas call → DENY (the multi-path trick)
+        assert not agent._bash_is_readonly_kb(
+            "python3 -c \"import pandas as pd; pd.read_csv('uploads/SESSION_A/mine.csv'); "
+            "print(pd.read_csv('uploads/SESSION_B/secret.csv'))\""
+        )
+        # cat both (own + foreign) → DENY
+        assert not agent._bash_is_readonly_kb("cat uploads/SESSION_A/mine.csv uploads/SESSION_B/secret.csv")
+        # grep across both → DENY
+        assert not agent._bash_is_readonly_kb("grep X uploads/SESSION_A/m.csv uploads/SESSION_B/secret.csv")
+        # plain foreign reads (no own-dir tell) → DENY, via every read program
+        assert not agent._bash_is_readonly_kb("cat uploads/SESSION_B/secret.csv")
+        assert not agent._bash_is_readonly_kb("ls uploads/SESSION_B/")
+        assert not agent._bash_is_readonly_kb("head -5 uploads/SESSION_B/secret.csv")
+        assert not agent._bash_is_readonly_kb("find uploads/SESSION_B -name '*.csv'")
+        assert not agent._bash_is_readonly_kb(f"cat {_SB}/secret.csv")  # absolute foreign path
+        # the agent's OWN dir + knowledge are still allowed (the fix didn't break legit use)
+        assert agent._bash_is_readonly_kb(
+            "python3 -c \"import pandas as pd; print(pd.read_csv('uploads/SESSION_A/mine.csv').shape)\""
+        )
+        assert agent._bash_is_readonly_kb("cat uploads/SESSION_A/mine.csv")
+        assert agent._bash_is_readonly_kb("find uploads/SESSION_A -name '*.csv'")
+        assert agent._bash_is_readonly_kb("test -d knowledge && echo EXISTS")
+
+
 def test_injection_inside_uploaded_file_is_inert():
     """A prompt-injection payload that an uploaded file's CONTENT tries to provoke is denied by the
     hook regardless of session scope — the upload widens READ scope, never the action allow-list.

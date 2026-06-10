@@ -422,25 +422,44 @@ def _python_oneliner_is_safe(cmd: str) -> bool:
     return not any(b in cmd for b in banned)
 
 
-def _cmd_references_allowed_root(cmd: str) -> bool:
-    """True iff the command works over an allowed read root: the literal `knowledge`
-    tree, OR (for a run carrying a session_id) that session's uploads dir.
+# A path-like token inside a Bash command: a quoted or bare run of path chars that
+# names the knowledge/ tree or an uploads/ dir (the only filesystem areas a read-only
+# extraction command should ever touch). Matches both a deeper path
+# (`knowledge/x/y.csv`, `uploads/<sid>/f.csv`, `/app/uploads/<sid>/f`) AND a bare root
+# reference (`knowledge`, `uploads/<sid>`). We pull EVERY such token and require each
+# to be in scope — a command that references its own session but ALSO reads another
+# session's dir must be DENIED (that was the cross-session isolation leak).
+_PATH_TOKEN_RE = re.compile(
+    r"""['"]?((?:/[\w./-]*)?(?:knowledge|uploads)(?:/[\w.-]+)*)/?['"]?"""
+)
 
-    The session dir is matched by its unguessable id appearing in the command — a
-    command can only reference THIS run's session because the agent only ever learns
-    its own session id (from the auto-generated map path); another session's id is
-    never in scope, so a command naming it isn't matched here and falls through to a
-    deny. (`..`/absolute escapes are already caught by `_BASH_FORBIDDEN` + the
-    path-scope checks on Read/Glob/Grep.)
+
+def _all_named_paths_in_scope(cmd: str) -> bool:
+    """True iff EVERY knowledge//uploads/ path the command names is under an allowed
+    read root. A command with NO such path is True (a bare `test -d knowledge`/`ls`
+    scaffold has nothing to scope). One out-of-scope path (e.g. another session's dir)
+    → False. This is the cross-session-leak guard applied to every Bash command."""
+    return all(_path_in_kb(p) for p in _PATH_TOKEN_RE.findall(cmd))
+
+
+def _cmd_paths_all_in_scope(cmd: str) -> bool:
+    """True iff the command references at least one in-scope knowledge//uploads/ path
+    AND every referenced path is in scope. (Used as the data-access proof: a real
+    extraction command must touch an allowed root, and ONLY allowed roots.)"""
+    paths = _PATH_TOKEN_RE.findall(cmd)
+    if not paths:
+        return False  # no data path → not a data-access command (scaffolds handled elsewhere)
+    return all(_path_in_kb(p) for p in paths)
+
+
+def _cmd_references_allowed_root(cmd: str) -> bool:
+    """True iff the command's filesystem access stays within the allowed read roots.
+
+    Every knowledge//uploads/ path the command names must resolve under knowledge/ or
+    the CURRENT session's uploads dir. A command that reads another session's dir is
+    DENIED even if it also names its own — that closes the cross-session leak.
     """
-    if "knowledge" in cmd:
-        return True
-    sr = _current_session_root()
-    if sr:
-        sid = Path(sr).name  # the session_id segment
-        if f"uploads/{sid}" in cmd or sr in cmd:
-            return True
-    return False
+    return _cmd_paths_all_in_scope(cmd)
 
 
 def _bash_is_readonly_kb(cmd: str) -> bool:
@@ -466,7 +485,10 @@ def _bash_is_readonly_kb(cmd: str) -> bool:
     if "python" in c.split()[0]:
         if not _python_oneliner_is_safe(c):
             return False
-        return _cmd_references_allowed_root(c)
+        # Every path it reads must be in scope (no other session's dir), and it must
+        # reference at least one allowed root. _cmd_references_allowed_root now requires
+        # ALL named paths in scope, so a python body that reads A while naming B is denied.
+        return _all_named_paths_in_scope(c) and _cmd_references_allowed_root(c)
     # No raw pipes/semicolons for plain shell (data exfil / transform chains).
     # `&&`/`||` are allowed and handled below; a lone `|` or `;` is not.
     stripped = c.replace("&&", " ").replace("||", " ")
@@ -485,7 +507,13 @@ def _bash_is_readonly_kb(cmd: str) -> bool:
             return False
         if prog in ("python", "python3") and not _python_oneliner_is_safe(seg):
             return False
-    # Must actually be working over an allowed root (or an echo/test scaffold).
+    # ANY knowledge//uploads/ path the command names must be in scope (closes the
+    # cross-session leak: a command that lists/reads another session's dir is denied
+    # even if it's a "harmless" scaffold program). Compute this first, unconditionally.
+    if not _all_named_paths_in_scope(c):
+        return False
+    # Allowed when it works over an allowed root, OR it's a bare scaffold
+    # (echo/test/true/ls) with no out-of-scope path (already enforced just above).
     if _cmd_references_allowed_root(c) or c.split()[0] in ("echo", "test", "true", "ls"):
         return True
     return False
