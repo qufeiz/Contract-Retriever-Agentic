@@ -18,6 +18,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     HookMatcher,
+    ProcessError,
     ResultMessage,
     TextBlock,
     ThinkingBlock,
@@ -461,6 +462,57 @@ async def _single_message_stream(question: str):
 OnTrace = Callable[[TraceStep], Awaitable[None]]
 
 
+def _real_stderr(lines: list[str], limit: int = 400) -> str:
+    """Distil the CLI's captured stderr into the one-glance reason it died.
+
+    The SDK throws away the real stderr (placeholder "Check stderr output for details"), so we
+    collect it ourselves. The CLI is chatty (version notices, debug lines), so prefer the lines
+    that name a real fault — credit/auth/quota/rate — and fall back to the last non-empty line.
+    """
+    cleaned = [ln.strip() for ln in lines if ln and ln.strip()]
+    if not cleaned:
+        return ""
+    SIGNAL = ("credit", "balance", "401", "403", "unauthor", "forbidden", "invalid",
+              "api key", "api_key", "quota", "rate limit", "overloaded", "authentication")
+    signal_lines = [ln for ln in cleaned if any(k in ln.lower() for k in SIGNAL)]
+    chosen = signal_lines[-1] if signal_lines else cleaned[-1]
+    return chosen[:limit]
+
+
+async def probe_agent_ready() -> tuple[bool, str]:
+    """A real readiness check: can the `claude` CLI actually complete a minimal turn?
+
+    `/health` only checks that a key is *present*, which once shipped a dead demo (out of credit)
+    behind a green check. This runs one tiny no-tool prompt and reports the real reason if it can't
+    finish (e.g. "Credit balance is too low"). Kept cheap — a 2-token reply, tools off — but it is a
+    real API call, so the readiness endpoint that calls it is opt-in (see main.py /ready).
+    """
+    stderr_lines: list[str] = []
+    saw_result = False
+    try:
+        async for message in query(
+            prompt="Reply with the single word: ok",
+            options=ClaudeAgentOptions(
+                cwd=str(PROJECT_ROOT),
+                allowed_tools=[],            # no retrieval — just prove the CLI/key works
+                permission_mode="bypassPermissions",
+                system_prompt="Reply with exactly: ok",
+                model=MODEL,
+                max_turns=1,
+                stderr=lambda line: stderr_lines.append(line),
+            ),
+        ):
+            if isinstance(message, ResultMessage):
+                saw_result = True
+    except ProcessError as e:
+        return False, _real_stderr(stderr_lines) or f"agent CLI failed (exit {e.exit_code})"
+    except Exception as e:  # any other failure → not ready, surface it
+        return False, _real_stderr(stderr_lines) or str(e)
+    if not saw_result:
+        return False, _real_stderr(stderr_lines) or "agent produced no result"
+    return True, "ok"
+
+
 async def answer_question(
     question: str, on_trace: Optional[OnTrace] = None
 ) -> AskResponse:
@@ -487,38 +539,55 @@ async def answer_question(
         if on_trace is not None:
             await on_trace(step)
 
-    async for message in query(
-        prompt=_single_message_stream(question),
-        options=ClaudeAgentOptions(
-            cwd=str(PROJECT_ROOT),
-            setting_sources=["project"],   # load .claude/skills from the project
-            skills=["kb-retriever"],
-            allowed_tools=ALLOWED_TOOLS,
-            permission_mode="bypassPermissions",  # the PreToolUse hook is the gate
-            hooks={"PreToolUse": [HookMatcher(hooks=[_pre_tool_use])]},  # read-only enforcement
-            add_dirs=[],                   # no extra roots beyond cwd
-            system_prompt=SYSTEM_PROMPT,
-            model=MODEL,
-            max_turns=MAX_TURNS,
-            thinking={"type": "adaptive", "display": "summarized"},
-        ),
-    ):
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, ToolUseBlock):
-                    step = _trace_for_tool(block.name, block.input)
-                    if step:
-                        await _emit(step)
-                elif isinstance(block, ThinkingBlock) and block.thinking.strip():
-                    # keep a compact note of reasoning checkpoints (self-check visibility)
-                    t = block.thinking.strip()
-                    if any(k in t.lower() for k in ("self-check", "re-grep", "conflict", "not available", "absence")):
-                        await _emit(TraceStep(kind="note", detail=f"reasoning: {t[:200]}"))
-        elif isinstance(message, ResultMessage):
-            result_text = message.result
+    # Capture the CLI's real stderr. The SDK collapses a non-zero `claude` exit into a generic
+    # "Command failed with exit code 1 / Check stderr output for details" ProcessError and throws
+    # away the actual reason ("Credit balance is too low", "401 unauthorized", …). The only way to
+    # recover it is the per-line stderr callback — so we collect it and re-raise with the real text,
+    # otherwise a dead key looks identical to any other crash. (See the gotcha + the /ready probe.)
+    stderr_lines: list[str] = []
+
+    try:
+        async for message in query(
+            prompt=_single_message_stream(question),
+            options=ClaudeAgentOptions(
+                cwd=str(PROJECT_ROOT),
+                setting_sources=["project"],   # load .claude/skills from the project
+                skills=["kb-retriever"],
+                allowed_tools=ALLOWED_TOOLS,
+                permission_mode="bypassPermissions",  # the PreToolUse hook is the gate
+                hooks={"PreToolUse": [HookMatcher(hooks=[_pre_tool_use])]},  # read-only enforcement
+                add_dirs=[],                   # no extra roots beyond cwd
+                system_prompt=SYSTEM_PROMPT,
+                model=MODEL,
+                max_turns=MAX_TURNS,
+                thinking={"type": "adaptive", "display": "summarized"},
+                stderr=lambda line: stderr_lines.append(line),
+            ),
+        ):
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, ToolUseBlock):
+                        step = _trace_for_tool(block.name, block.input)
+                        if step:
+                            await _emit(step)
+                    elif isinstance(block, ThinkingBlock) and block.thinking.strip():
+                        # keep a compact note of reasoning checkpoints (self-check visibility)
+                        t = block.thinking.strip()
+                        if any(k in t.lower() for k in ("self-check", "re-grep", "conflict", "not available", "absence")):
+                            await _emit(TraceStep(kind="note", detail=f"reasoning: {t[:200]}"))
+            elif isinstance(message, ResultMessage):
+                result_text = message.result
+    except ProcessError as e:
+        # Surface the real reason the CLI died (the SDK hid it behind a placeholder).
+        detail = _real_stderr(stderr_lines) or e.stderr or "no stderr captured"
+        raise RuntimeError(f"agent CLI failed (exit {e.exit_code}): {detail}") from e
 
     if not result_text:
-        raise RuntimeError("Agent returned empty result")
+        # The CLI exited 0 but produced no result message — surface any stderr it left.
+        detail = _real_stderr(stderr_lines)
+        raise RuntimeError(
+            f"Agent returned empty result{f' — {detail}' if detail else ''}"
+        )
 
     parsed = _extract_output(result_text)
     answer = parsed.get("answer", "")

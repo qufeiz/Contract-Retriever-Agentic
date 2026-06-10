@@ -16,6 +16,13 @@ Public-surface guards (the endpoint is internet-exposed): a length cap on the qu
 and a simple per-IP rolling rate limit (429), so a hijacked/abusive caller can't bleed agent
 runs. The deeper RCE/prompt-injection defense — the agent's read-only allow-list — lives in
 backend/agent.py (`_pre_tool_use`).
+
+Health vs readiness: `/health` is liveness (process up + key PRESENT) — cheap, frequent. `/ready`
+is real readiness (one minimal agent turn actually completes), used on deploy / before declaring
+live, because a present-but-dead key (e.g. out of credit) once passed /health while every agent run
+died at CLI startup. When the agent CLI fails, the REAL reason (e.g. "Credit balance is too low")
+is surfaced in the job/response error — answer_question re-raises it instead of the SDK's generic
+"exit code 1" wrapper.
 """
 import asyncio
 import os
@@ -28,7 +35,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from backend.agent import answer_question
+from backend.agent import answer_question, probe_agent_ready
 from backend.config import (
     JOB_TTL_SEC,
     MAX_QUESTION_CHARS,
@@ -151,7 +158,27 @@ def _guard_question(question: str, request: Request) -> JSONResponse | None:
 
 @app.get("/health")
 async def health() -> dict:
+    """Liveness only: the process is up and a key is PRESENT. Does NOT prove the key works —
+    use /ready for that (a present-but-dead key once shipped a broken demo behind this green check)."""
     return {"ok": True, "key_configured": anthropic_key_present()}
+
+
+@app.get("/ready")
+async def ready():
+    """Real readiness: run ONE minimal agent turn and report whether the CLI/key can actually
+    complete. Returns 200 {ready:true} when the agent works, 503 {ready:false, reason:"..."} with
+    the real reason (e.g. "Credit balance is too low") when it can't. This is a real API call (a
+    couple of tokens), so call it on deploy / before declaring live — not as a high-frequency probe."""
+    if not anthropic_key_present():
+        return JSONResponse(
+            status_code=503,
+            content={"ready": False, "reason": "ANTHROPIC_API_KEY is not configured."},
+        )
+    ok, reason = await probe_agent_ready()
+    return JSONResponse(
+        status_code=200 if ok else 503,
+        content={"ready": ok, "reason": reason},
+    )
 
 
 @app.post("/api/ask", response_model=AskResponse)
