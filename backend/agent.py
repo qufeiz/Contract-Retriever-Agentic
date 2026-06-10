@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Awaitable, Callable, Optional
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -66,6 +67,15 @@ citations + honesty.
 - When you list a set (e.g. expiring contracts), STATE THE AGGREGATES in the prose too — the COUNT \
 and the SUM (e.g. "38 contracts expire ... with a combined annual cost of $18,924,883.79") — not \
 just an itemized table. The reader needs the headline totals stated explicitly.
+- LARGE RESULT SET — DO NOT enumerate a citation token for every row. Compute the whole set in ONE \
+pandas pass (filter + count + sum), then in the ANSWER: (a) state the COUNT and SUM as the headline, \
+cited ONCE to the file with a computed locator (e.g. `[F:school-operations/contracts.csv#expiring-90d]`, \
+backed by one evidence item describing the pandas filter); (b) show a SMALL illustrative sample — the \
+EARLIEST-expiring 5 rows, ordered `End Date ASC, Vendor ASC, then source-row-index ASC` — each as a \
+real `row=<Vendor>|<ISO-date>` citation; (c) say explicitly "full <N>-row list available on request". \
+Do NOT emit 30+ per-row citation tokens or a 30+-item evidence array — the headline aggregate + a \
+5-row cited sample is the grounded form, and it must be COMPUTED in pandas, not hand-typed row by row \
+(hand-typing invites a wrong row key, which fails validation).
 
 After you have retrieved and self-checked, output your FINAL answer in EXACTLY this two-block \
 format and NOTHING else (no prose before or after, no markdown fence). The ANSWER block is free \
@@ -444,8 +454,22 @@ async def _single_message_stream(question: str):
     }
 
 
-async def answer_question(question: str) -> AskResponse:
-    """Run the agent for one question and return the Aletheia output contract."""
+# A live-trace callback: invoked with each new TraceStep as the agent works, so a
+# long run can stream progress (the async-job path uses this to show the agent's
+# trace while it runs). Synchronous callers (the eval harness) pass None and just
+# get the final trace on the returned AskResponse.
+OnTrace = Callable[[TraceStep], Awaitable[None]]
+
+
+async def answer_question(
+    question: str, on_trace: Optional[OnTrace] = None
+) -> AskResponse:
+    """Run the agent for one question and return the Aletheia output contract.
+
+    If `on_trace` is given, it is awaited with every TraceStep as it is produced —
+    used by the async-job endpoint to stream the live agent trace to the UI while
+    the (multi-minute) run is still in flight.
+    """
     # Input guard: reject empty / over-long questions before spending an agent run.
     question = (question or "").strip()
     if not question:
@@ -457,6 +481,11 @@ async def answer_question(question: str) -> AskResponse:
 
     trace: list[TraceStep] = []
     result_text: str | None = None
+
+    async def _emit(step: TraceStep) -> None:
+        trace.append(step)
+        if on_trace is not None:
+            await on_trace(step)
 
     async for message in query(
         prompt=_single_message_stream(question),
@@ -479,12 +508,12 @@ async def answer_question(question: str) -> AskResponse:
                 if isinstance(block, ToolUseBlock):
                     step = _trace_for_tool(block.name, block.input)
                     if step:
-                        trace.append(step)
+                        await _emit(step)
                 elif isinstance(block, ThinkingBlock) and block.thinking.strip():
                     # keep a compact note of reasoning checkpoints (self-check visibility)
                     t = block.thinking.strip()
                     if any(k in t.lower() for k in ("self-check", "re-grep", "conflict", "not available", "absence")):
-                        trace.append(TraceStep(kind="note", detail=f"reasoning: {t[:200]}"))
+                        await _emit(TraceStep(kind="note", detail=f"reasoning: {t[:200]}"))
         elif isinstance(message, ResultMessage):
             result_text = message.result
 

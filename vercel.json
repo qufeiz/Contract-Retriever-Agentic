@@ -2,6 +2,12 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "nextjs",
   "functions": {
+    "app/api/ask/jobs/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/ask/jobs/[id]/route.ts": {
+      "maxDuration": 30
+    },
     "app/api/ask/route.ts": {
       "maxDuration": 300
     }

@@ -32,6 +32,11 @@ MAX_QUESTION_CHARS = int(os.environ.get("MAX_QUESTION_CHARS", "600"))
 RATE_LIMIT_MAX = int(os.environ.get("RATE_LIMIT_MAX", "20"))
 RATE_LIMIT_WINDOW_SEC = int(os.environ.get("RATE_LIMIT_WINDOW_SEC", "60"))
 
+# Async-job store: how long a FINISHED job (done/error) is retained for polling
+# before it's pruned. Generous enough that a slow poller still reads its result,
+# short enough that the in-process dict stays bounded on the demo surface.
+JOB_TTL_SEC = int(os.environ.get("JOB_TTL_SEC", "900"))  # 15 min
+
 
 def anthropic_key_present() -> bool:
     """True iff an Anthropic key is configured. Never returns the key itself."""

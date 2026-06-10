@@ -68,12 +68,23 @@ const locLabel = (loc: string) => {
   return loc;
 };
 
+// Async-job polling cadence. Submit returns a job id fast; we then poll the
+// status endpoint, surfacing the live agent trace until status is done/error.
+// Each poll is a short request, so a multi-minute agent run never 504s — the
+// long work lives on Fly (no request cap), not in a single Vercel function call.
+const POLL_INTERVAL_MS = 1500;
+const POLL_TIMEOUT_MS = 12 * 60 * 1000; // generous ceiling for the heaviest agent run
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export default function Home() {
   const [question, setQuestion] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<AnswerResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeCite, setActiveCite] = useState<string | null>(null);
+  // The live agent trace while a job is running (streamed via polling).
+  const [liveTrace, setLiveTrace] = useState<TraceStep[]>([]);
   const sourcesRef = useRef<HTMLDivElement>(null);
 
   async function ask(q: string) {
@@ -81,15 +92,40 @@ export default function Home() {
     setError(null);
     setResult(null);
     setActiveCite(null);
+    setLiveTrace([]);
     try {
-      const res = await fetch("/api/ask", {
+      // 1. Submit the question → get a job id back immediately (under the cap).
+      const submit = await fetch("/api/ask/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: q }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "request failed");
-      setResult(data as AnswerResult);
+      const job = await submit.json();
+      if (!submit.ok) throw new Error(job.error ?? "request failed");
+      const jobId: string = job.job_id;
+      if (!jobId) throw new Error("backend did not return a job id");
+
+      // 2. Poll the job → stream the live agent trace, then the final answer.
+      const started = Date.now();
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        if (Date.now() - started > POLL_TIMEOUT_MS) {
+          throw new Error("the agent run took too long — please try again");
+        }
+        await sleep(POLL_INTERVAL_MS);
+        const poll = await fetch(`/api/ask/jobs/${encodeURIComponent(jobId)}`);
+        const data = await poll.json();
+        if (!poll.ok) throw new Error(data.error ?? "polling failed");
+        if (Array.isArray(data.trace)) setLiveTrace(data.trace as TraceStep[]);
+        if (data.status === "done" && data.result) {
+          setResult(data.result as AnswerResult);
+          return;
+        }
+        if (data.status === "error") {
+          throw new Error(data.error ?? "the agent run failed");
+        }
+        // status === "running" → keep polling.
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "request failed");
     } finally {
@@ -210,7 +246,7 @@ export default function Home() {
       )}
 
       {loading && (
-        <div className="card">
+        <div className="card" data-testid="thinking-panel">
           <div className="thinking">
             <span className="spinner" />
             <span>
@@ -218,6 +254,16 @@ export default function Home() {
               <span className="steps"> · navigate → learn → extract → self-check → cite</span>
             </span>
           </div>
+          {liveTrace.length > 0 && (
+            <ol className="trace-list live" data-testid="live-trace">
+              {liveTrace.map((t, i) => (
+                <li key={i} className={`trace-step ${t.kind}`}>
+                  <span className="trace-kind">{t.kind}</span>
+                  <span className="trace-detail">{t.detail}</span>
+                </li>
+              ))}
+            </ol>
+          )}
         </div>
       )}
 
