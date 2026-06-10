@@ -16,6 +16,7 @@ import re
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
+    HookMatcher,
     ResultMessage,
     TextBlock,
     ThinkingBlock,
@@ -24,7 +25,7 @@ from claude_agent_sdk import (
     query,
 )
 
-from backend.config import MAX_TURNS, MODEL, PROJECT_ROOT, KB_PATH
+from backend.config import MAX_QUESTION_CHARS, MAX_TURNS, MODEL, PROJECT_ROOT, KB_PATH
 from backend.models import AskResponse, EvidenceItem, TraceStep, Validation
 from backend.validate import validate
 
@@ -216,25 +217,257 @@ def _extract_output(text: str) -> dict:
     try:
         return json.loads(blob)
     except json.JSONDecodeError:
+        pass
+    try:
         return json.loads(_escape_control_chars_in_strings(blob))
+    except json.JSONDecodeError:
+        # Last resort: the agent answered in free prose without the contract
+        # blocks (e.g. a hard refusal of a hijacked request). Don't 500 — return
+        # the prose as an UN-grounded answer. validate() will mark it correctly:
+        # if it makes uncited claims it fails the gate; a pure refusal passes.
+        return {"answer": text.strip(), "evidence": []}
 
 
+# ---------------------------------------------------------------------------
+# Public-surface hardening (the agent is internet-exposed → a prompt-injection /
+# RCE surface). The single enforcement point is the `_pre_tool_use` HOOK, which
+# the SDK consults BEFORE every tool runs and which can hard-DENY a call (a
+# denied tool never executes — the model sees the deny reason as the tool
+# result). We verified empirically that on this SDK/CLI version the `can_use_tool`
+# callback is NOT consulted on the query() path, but `PreToolUse` IS and a
+# `permissionDecision: "deny"` genuinely blocks execution — so the hook, not the
+# callback, is the real gate. (See docs/gotchas/agent-hardening-hook-not-callback.md.)
+#
+# Policy (ALLOW-LIST): only Read/Grep/Glob scoped to the `knowledge/` tree, and
+# Bash limited to read-only extraction (pdftotext / a pandas python one-liner /
+# grep & friends) over that tree. No Write/Edit, no network, no shell chaining
+# beyond `&&`/`||` between allow-listed read-only programs, nothing that escapes
+# `knowledge/`. Documented in 04-implementation.md (§Hardening) + docs/gotchas.
+# ---------------------------------------------------------------------------
+
+# `allowed_tools` only pre-approves which tools the model may attempt; it is NOT
+# the security boundary (the CLI auto-approves these without escalating, so it
+# can't enforce path/command scoping). The hook below is the boundary.
 ALLOWED_TOOLS = ["Read", "Glob", "Grep", "Bash"]
+
+# Read-only shell programs the agent may run (the kb-retriever skill's extract
+# step: pdftotext for PDFs, a pandas/python one-liner for CSVs, plus harmless
+# text inspection). EVERY program in a (possibly &&/||-chained) command must be
+# one of these.
+_ALLOWED_BASH_PROGRAMS = {
+    "pdftotext", "python", "python3", "grep", "rg", "head", "tail",
+    "cat", "wc", "ls", "find", "test", "sort", "uniq", "cut", "tr", "echo", "true",
+}
+# Hard-forbidden substrings: redirection to disk, command substitution, network
+# clients, package managers, deploy CLIs, privilege/escape, and path escapes.
+# These never appear in a legitimate read-only pdftotext/pandas/grep command.
+_BASH_FORBIDDEN = (
+    ">", "`", "$(", "${",
+    "rm ", "mv ", "cp ", "chmod", "chown", "curl", "wget", "nc ", "netcat",
+    "ssh", "scp", "git ", "pip ", "pip3", "npm ", "node ", "fly", "vercel",
+    "/etc/", "/root", "sudo", "export ", "eval ",
+    "-exec", "-delete", "-fprint",  # find's command-execution / write flags
+)
+# A path is in-scope iff it stays under the knowledge/ root after resolution.
+_KB_ROOT = str(KB_PATH.resolve())
+
+
+def _path_in_kb(raw: str) -> bool:
+    """True iff `raw` resolves to a location inside the knowledge/ tree."""
+    if not raw:
+        return False
+    try:
+        from pathlib import Path as _P
+
+        p = raw if raw.startswith("/") else str(PROJECT_ROOT / raw)
+        resolved = str(_P(p).resolve())
+    except Exception:
+        return False
+    return resolved == _KB_ROOT or resolved.startswith(_KB_ROOT + "/")
+
+
+def _pattern_scoped_to_kb(pattern: str) -> bool:
+    """True iff a Glob/Grep pattern is confined to the knowledge/ tree.
+
+    Accepts a relative glob that starts at the knowledge root (e.g.
+    'knowledge/**/*.csv') or an absolute path under it. Rejects a bare
+    '**/*' that would scan the whole repo, and any '..' escape.
+    """
+    p = pattern.strip()
+    if not p or ".." in p:
+        return False
+    if p.startswith("/"):
+        # absolute: must sit under the knowledge root
+        return p == _KB_ROOT or p.startswith(_KB_ROOT + "/")
+    return p.startswith("knowledge/") or p == "knowledge"
+
+
+def _python_oneliner_is_safe(cmd: str) -> bool:
+    """A python/pandas extraction one-liner is safe iff it neither writes to disk
+    nor shells out / networks. Reading CSVs with pandas is the intended use."""
+    banned = (
+        "os.system", "subprocess", "socket", "urllib", "requests", "shutil",
+        "Path.write", ".write_text", ".write_bytes", ".to_csv", ".to_excel",
+        "eval(", "exec(", "__import__", "open(",  # open() can write; pandas reads suffice
+    )
+    return not any(b in cmd for b in banned)
+
+
+def _bash_is_readonly_kb(cmd: str) -> bool:
+    """Vet a Bash command: read-only extraction confined to the knowledge/ tree.
+
+    A command may chain allow-listed read-only programs with `&&`/`||`. It is
+    allowed only when: (a) it contains no forbidden substring (redirection,
+    command-substitution, network, package/deploy tools, privilege/escape),
+    (b) every program token is allow-listed, (c) any python one-liner / heredoc
+    is write-free and network-free, and (d) it references the knowledge/ tree
+    (a bare `test -d knowledge` existence check is also fine).
+    """
+    c = cmd.strip()
+    if not c:
+        return False
+    if any(tok in c for tok in _BASH_FORBIDDEN):
+        return False
+    # A python extraction (one-liner `python3 -c "..."` or a `python3 - <<'EOF'
+    # ... EOF` heredoc) is vetted as a WHOLE and must be write/network-free. It
+    # legitimately contains `;` inside its quoted body, so it is checked BEFORE
+    # the pipe/semicolon guard below (which is for plain shell commands).
+    if "python" in c.split()[0]:
+        if not _python_oneliner_is_safe(c):
+            return False
+        return "knowledge" in c
+    # No raw pipes/semicolons for plain shell (data exfil / transform chains).
+    # `&&`/`||` are allowed and handled below; a lone `|` or `;` is not.
+    stripped = c.replace("&&", " ").replace("||", " ")
+    if "|" in stripped or ";" in stripped:
+        return False
+    # Split on the chain operators and require every segment's leading program
+    # to be allow-listed.
+    import re as _re
+
+    for seg in _re.split(r"&&|\|\|", c):
+        seg = seg.strip()
+        if not seg:
+            continue
+        prog = seg.split()[0].rsplit("/", 1)[-1]
+        if prog not in _ALLOWED_BASH_PROGRAMS:
+            return False
+        if prog in ("python", "python3") and not _python_oneliner_is_safe(seg):
+            return False
+    # Must actually be working over the knowledge tree (or an echo/test scaffold).
+    if "knowledge" in c or c.split()[0] in ("echo", "test", "true", "ls"):
+        return True
+    return False
+
+
+def _deny(reason: str) -> dict:
+    """A PreToolUse hook result that hard-blocks the tool (model sees the reason)."""
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
+async def _pre_tool_use(input_data: dict, tool_use_id, context):
+    """The real security boundary: deny anything outside the read-only KB policy.
+
+    Returns {} to allow, or a deny decision the SDK enforces (the tool never
+    runs). Verified: a deny here genuinely blocks execution on this SDK version.
+    """
+    name = input_data.get("tool_name", "")
+    ti = input_data.get("tool_input", {}) or {}
+
+    # Loading skill instructions is read-only (it injects the kb-retriever
+    # methodology the agent already runs under) — allow it.
+    if name in ("Skill", "TodoWrite"):
+        return {}
+
+    if name == "Read":
+        path = str(ti.get("file_path") or ti.get("path") or "")
+        if _path_in_kb(path):
+            return {}
+        return _deny(f"Reads are restricted to the knowledge/ tree; '{path}' is out of scope.")
+
+    if name == "Glob":
+        # Glob's file scope is the `pattern` (and an optional `path` root).
+        path = str(ti.get("path") or "")
+        pattern = str(ti.get("pattern") or "")
+        if path:
+            if _path_in_kb(path):
+                return {}
+            return _deny(f"Glob is restricted to the knowledge/ tree; '{path}' is out of scope.")
+        if _pattern_scoped_to_kb(pattern):
+            return {}
+        return _deny(
+            "Glob must be scoped to knowledge/ (set path='knowledge' or a "
+            "'knowledge/...' pattern)."
+        )
+
+    if name == "Grep":
+        # Grep's `pattern` is the search REGEX; the file scope is `path` and/or
+        # the `glob` include filter. Require at least one to confine the search.
+        path = str(ti.get("path") or "")
+        glob = str(ti.get("glob") or "")
+        if path:
+            if _path_in_kb(path):
+                return {}
+            return _deny(f"Grep is restricted to the knowledge/ tree; '{path}' is out of scope.")
+        if glob and _pattern_scoped_to_kb(glob):
+            return {}
+        return _deny(
+            "Grep must be scoped to knowledge/ (set path='knowledge' or a "
+            "glob='knowledge/...')."
+        )
+
+    if name == "Bash":
+        cmd = str(ti.get("command", ""))
+        if _bash_is_readonly_kb(cmd):
+            return {}
+        return _deny(
+            "Only read-only extraction over knowledge/ is allowed (pdftotext / a "
+            "pandas python one-liner / grep). No writes, no networking, no piping, "
+            "no path escapes."
+        )
+
+    # Everything else (Write, Edit, WebFetch, WebSearch, Task, NotebookEdit, …).
+    return _deny(f"Tool '{name}' is not permitted on this read-only knowledge assistant.")
+
+
+async def _single_message_stream(question: str):
+    """Wrap the question as the streaming-mode prompt the SDK consumes."""
+    yield {
+        "type": "user",
+        "message": {"role": "user", "content": question},
+    }
 
 
 async def answer_question(question: str) -> AskResponse:
     """Run the agent for one question and return the Aletheia output contract."""
+    # Input guard: reject empty / over-long questions before spending an agent run.
+    question = (question or "").strip()
+    if not question:
+        raise ValueError("question is empty")
+    if len(question) > MAX_QUESTION_CHARS:
+        raise ValueError(
+            f"question too long ({len(question)} chars; max {MAX_QUESTION_CHARS})"
+        )
+
     trace: list[TraceStep] = []
     result_text: str | None = None
 
     async for message in query(
-        prompt=question,
+        prompt=_single_message_stream(question),
         options=ClaudeAgentOptions(
             cwd=str(PROJECT_ROOT),
             setting_sources=["project"],   # load .claude/skills from the project
             skills=["kb-retriever"],
             allowed_tools=ALLOWED_TOOLS,
-            permission_mode="bypassPermissions",   # headless backend: no interactive prompts
+            permission_mode="bypassPermissions",  # the PreToolUse hook is the gate
+            hooks={"PreToolUse": [HookMatcher(hooks=[_pre_tool_use])]},  # read-only enforcement
+            add_dirs=[],                   # no extra roots beyond cwd
             system_prompt=SYSTEM_PROMPT,
             model=MODEL,
             max_turns=MAX_TURNS,

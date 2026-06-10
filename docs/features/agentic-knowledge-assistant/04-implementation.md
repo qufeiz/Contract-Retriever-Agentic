@@ -64,7 +64,24 @@ Every `/api/ask` response — the exact shape the Aletheia UI consumes:
 
 ### Model + cost
 
-Default agent model `claude-sonnet-4-6` (`AGENT_MODEL` env). The LLM-judge in the eval uses `claude-haiku-4-5` (cheap). The key lives only in the gitignored `.env` (+ the Vercel env) — never committed.
+Default agent model `claude-sonnet-4-6` (`AGENT_MODEL` env). The LLM-judge in the eval uses `claude-haiku-4-5` (cheap). The key lives only in the gitignored `.env` (locally) and as a **Fly secret** in prod (+ the Vercel env for the proxy URL) — never committed, never baked into the image.
+
+---
+
+## Hardening (the public surface)
+
+The deployed `/api/ask` is internet-exposed, so the agent loop is a prompt-injection / RCE surface (it shells out to `pdftotext` + a pandas one-liner under `bypassPermissions`). Two layers contain it:
+
+**1. The read-only tool gate — a `PreToolUse` hook (`backend/agent.py::_pre_tool_use`).** This is the security boundary. The SDK consults it before every tool call and a `permissionDecision: "deny"` genuinely blocks execution (the tool never runs; the model sees the deny reason). The allow-list:
+- `Read`/`Glob`/`Grep` only when scoped under `knowledge/` (a path or a `knowledge/…` pattern).
+- `Bash` only for read-only extraction over `knowledge/`: `pdftotext`, a **write-and-network-free** `python` pandas one-liner, `grep`/`find`(no `-exec`)/`head`/`cat`/etc. — with **no** redirection (`>`), command-substitution (`` ` ``/`$(`), pipes, package/deploy tools, or path escape (`..`, `/etc`).
+- Everything else (`Write`, `Edit`, `WebFetch`, `WebSearch`, `Task`, …) is **denied**.
+
+> ⚠️ **Why a hook, not `can_use_tool` or `allowed_tools`.** On this SDK/CLI version `allowed_tools` only pre-approves which tools the model may attempt (the CLI auto-approves them — not a boundary), and the `can_use_tool` callback was verified to be **never invoked** on the `query()` path (a spy logged zero decisions). Only the `PreToolUse` hook reliably fires and blocks. See [docs/gotchas/public-agent-hardening-hook-not-callback.md](../../gotchas/public-agent-hardening-hook-not-callback.md).
+
+**2. Input guards (`backend/main.py` + `config.py`).** A length cap (`MAX_QUESTION_CHARS=600` → HTTP 413) and a per-IP rolling rate limit (`RATE_LIMIT_MAX` per `RATE_LIMIT_WINDOW_SEC` → HTTP 429) so an abusive caller can't bleed agent runs. CORS is restricted to the demo origin via `ALLOWED_ORIGINS`.
+
+A hard refusal of a hijacked prompt comes back as free prose (no contract blocks); `_extract_output` returns it as an un-grounded answer rather than 500-ing. **Locked by `backend/tests/test_hardening.py`** (the allow/deny matrix) + `test_extract_json.py::test_free_prose_refusal_does_not_crash`, and verified live: an `/etc/passwd` + key-print injection against the deployed app returns no system data and no key.
 
 ---
 
@@ -73,33 +90,33 @@ Default agent model `claude-sonnet-4-6` (`AGENT_MODEL` env). The LLM-judge in th
 There is **no schema migration** (no DB). The "migration" is the data placement + the deploy wiring:
 
 - **Data presence is a hard gate** (`03` Layer F): the `knowledge/` tree must contain the four usable files + the four `data_structure.md` maps + the `_dropped/` map. A missing file is a RED, not a skipped test.
-- **Deploy topology:** the Next.js frontend on Vercel proxies `/api/ask` to the Python FastAPI backend (`AGENT_BACKEND_URL`). `poppler-utils` (`pdftotext`) and the Python deps must be present wherever the backend runs.
+- **Deploy topology (LIVE):** the Next.js frontend on **Vercel** (`https://aletheia-agentic-demo.vercel.app`) proxies `/api/ask` to the Python FastAPI backend on **Fly.io** (`https://aletheia-agentic.fly.dev`, set via `AGENT_BACKEND_URL`). The backend needs a real container — the Claude Agent SDK spawns the `claude` CLI and the kb-retriever skill shells out to `pdftotext` — so it runs the bundled [`Dockerfile`](../../../Dockerfile) (Python 3.12 + Node + `poppler-utils` + the pinned `@anthropic-ai/claude-code` CLI; `knowledge/` + `.claude/skills/` + `backend/` baked in), serving uvicorn on Fly port 8080. [`fly.toml`](../../../fly.toml) wires the HTTP service + a `/health` check; the key is a **Fly secret** (`fly secrets set ANTHROPIC_API_KEY=…`), never in the image. Single machine (the in-process rate limiter assumes one instance).
 - **Keyless CI gate** (`.github/workflows/ci.yml`): `doc-lint` + `doc-structure-lint` + `typecheck` + `npm run test:agent` (the validator unit tests). The **eval harness** (`eval:agent`) calls the real Anthropic API and runs as a separate **key-gated** job — see [docs/testing/README.md](../../testing/README.md).
-- **Prod-verify runbook:** the post-deploy G-1…G-4 + Hebrew + citation-chip checks from `03` §Prod-verify, run against the new Vercel URL.
+- **Known constraint — the Vercel request cap vs. agent latency.** The proxy is **synchronous**, and Vercel's serverless function ceiling is a hard **300s**. Measured live: the fast golden queries return well under it (G-4 ≈ 108s, G-3 ≈ 90s), but the heaviest query — **G-1, the 38-row contract table — takes ≈ 509s (≈8.5 min)** end-to-end, so it **504s through the Vercel proxy** (`FUNCTION_INVOCATION_TIMEOUT`) while it returns correctly when hit **directly** against the Fly backend (`https://aletheia-agentic.fly.dev/api/ask`, HTTP 200, validated). The golden **screenshots** were therefore captured against the Fly backend (via the local Next.js server, which has no request cap) so every shot is a real live render. The production fix for G-1 on the public URL is to make `/api/ask` **asynchronous** (submit→poll / stream) rather than a single long request; until then the public demo is best used with the faster queries, and the slow path is verified directly against Fly + by the eval harness.
+- **Prod-verify runbook:** the post-deploy G-1…G-4 + Hebrew + citation-chip checks from `03` §Prod-verify, run against the Vercel URL (or, for G-1's >300s run, directly against the Fly backend).
 
 > The current parent project (`Contract-Retriever-RAG`) stays **live and untouched** — all of the above is in the new fork only.
 
-## Screenshots & journey-suite (environment note)
+## Screenshots & journey-suite
 
-The 6 golden screenshots (the README ledger / user-guide images) and the Playwright **journey suite**
-(`tests/journeys/agentic-knowledge-assistant.spec.ts`) both require a working headless browser to
-drive the live UI. In the build environment the Playwright Chromium install would not complete
-(the 173 MB download finished but extraction did not persist a runnable binary across several clean
-retries — an environment limitation, not a code issue). Consequently the screenshots were **not
-captured** here and the journey suite was **not run locally**.
-
-This was flagged honestly rather than faking the artifacts. The **content is fully proven by the
-eval harness** (`backend/eval/run.py`) — the stronger gate — which drives the real agent over the
-real `knowledge/` tree and asserts the same facts/citations/traces the screenshots would show.
-**To capture the screenshots + run the journey suite** (in an environment with a browser):
+The 6 golden screenshots (the README ledger / user-guide images) were captured by
+[`scripts/capture-golden-screenshots.mjs`](../../../scripts/capture-golden-screenshots.mjs) driving
+the **live demo** (`CAPTURE_BASE_URL=https://aletheia-agentic-demo.vercel.app`) — real agent
+round-trips, not mocks — and committed to
+[`docs/features/agentic-knowledge-assistant/images/`](images/). Each shot is pinned to
+`asOfDate=2026-06-09` so the "38 contracts" count is stable. To re-capture (browser already in the
+Playwright cache):
 
 ```bash
-npx playwright install chromium            # provision the browser
-npm run start &                            # frontend :3000
-python -m uvicorn backend.main:app &       # backend :8000  (needs ANTHROPIC_API_KEY in .env)
-node scripts/capture-golden-screenshots.mjs   # writes the 6 PNGs into images/
-npm run test:journeys                       # the live journey gate
+CAPTURE_BASE_URL=https://aletheia-agentic-demo.vercel.app \
+  node scripts/capture-golden-screenshots.mjs        # writes the 6 PNGs into images/
 ```
 
-The capture script and the journey spec are committed and ready; only the browser provisioning is
-the gap. The user-guide image lines are marked "capture pending" until then.
+Against a **local** stack instead, run `npm run start` (frontend :3000) + uvicorn (backend :8000,
+needs `ANTHROPIC_API_KEY`) and omit `CAPTURE_BASE_URL`.
+
+The Playwright **journey suite** (`tests/journeys/agentic-knowledge-assistant.spec.ts`) is the
+behavioral gate (`npm run test:journeys`) — it asserts the real cited answer + resolvable `[F:..]`
+chips + the trace panel, removable-handler-proof. The **content** is independently proven by the
+eval harness (`backend/eval/run.py`), the stronger gate, which drives the real agent over the real
+`knowledge/` tree across N runs.

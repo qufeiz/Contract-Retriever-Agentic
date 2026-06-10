@@ -1,0 +1,26 @@
+# Keep the Fly build context lean + never ship secrets or local state.
+.env
+.env*.local
+.venv/
+node_modules/
+.next/
+.git/
+.github/
+.cache/
+.pytest_cache/
+**/__pycache__/
+*.pyc
+test-results/
+playwright-report/
+docs/
+tests/
+scripts/
+app/
+*.md
+!.claude/skills/**/*.md
+!knowledge/**/*.md
+tsconfig*.json
+package*.json
+playwright.journeys.config.ts
+next*.mjs
+next-env.d.ts

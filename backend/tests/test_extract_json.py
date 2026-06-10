@@ -62,3 +62,15 @@ def test_legacy_literal_newlines_inside_string():
     raw = '{"answer": "line one\nline two", "evidence": []}'
     d = _extract_output(raw)
     assert d["answer"].count("\n") == 1
+
+
+# ── Last-resort: free prose with no blocks and no JSON (a hard refusal) ─────────
+def test_free_prose_refusal_does_not_crash():
+    # A hijacked request the agent refuses comes back as free prose — no
+    # ANSWER/EVIDENCE blocks, no JSON. It must NOT raise; the prose is returned
+    # as an un-grounded answer (validate() then scores it: a pure refusal with
+    # no citations passes, an uncited claim fails).
+    text = "I can't run that command — this assistant only reads the knowledge base."
+    out = _extract_output(text)
+    assert out["answer"] == text
+    assert out["evidence"] == []

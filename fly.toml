@@ -1,0 +1,41 @@
+# Fly.io config for the Aletheia agentic backend.
+#
+# Single-instance app (the in-process rate limiter + per-IP state assume one
+# machine). The agent loop can run for minutes, so we keep at least one machine
+# warm (no scale-to-zero) and give the HTTP service a long enough grace.
+
+app = "aletheia-agentic"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  AGENT_MODEL = "claude-sonnet-4-6"
+  AGENT_MAX_TURNS = "40"
+  # CORS is set to the Vercel demo origin via the ALLOWED_ORIGINS secret/env at deploy.
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    # The agent run is long + single-flight-ish; keep concurrency modest.
+    hard_limit = 8
+    soft_limit = 4
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/health"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "20s"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"

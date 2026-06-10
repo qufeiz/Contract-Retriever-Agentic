@@ -6,7 +6,7 @@ This is a **re-platforming** of the shipped `Contract-Retriever-RAG` onto the us
 
 ## Docs
 - **PM-authored (the design + golden bar + gate list):** [00-research.md](00-research.md) · [01-design.md](01-design.md) · [02-examples.md](02-examples.md) · [03-tests.md](03-tests.md)
-- **Engineer-authored (build):** `04-implementation.md` · `user-guide.md` *(added at build — not yet written)*
+- **Engineer-authored (build):** [04-implementation.md](04-implementation.md) · [user-guide.md](user-guide.md)
 
 ## Screenshot / gate ledger
 

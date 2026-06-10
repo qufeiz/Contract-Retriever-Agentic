@@ -22,6 +22,16 @@ MODEL = os.environ.get("AGENT_MODEL", "claude-sonnet-4-6")
 # Hard ceiling on agent turns so a runaway loop can't bleed cost.
 MAX_TURNS = int(os.environ.get("AGENT_MAX_TURNS", "40"))
 
+# Public-surface input guards (the endpoint is internet-exposed). A question
+# longer than this is rejected before an agent run is spent; the per-IP request
+# rate is capped in main.py. Tuned generously enough for the longest real
+# business question (the bilingual Carter / multi-clause contract prompts).
+MAX_QUESTION_CHARS = int(os.environ.get("MAX_QUESTION_CHARS", "600"))
+
+# Simple in-process rate limit: max questions per IP per rolling window.
+RATE_LIMIT_MAX = int(os.environ.get("RATE_LIMIT_MAX", "20"))
+RATE_LIMIT_WINDOW_SEC = int(os.environ.get("RATE_LIMIT_WINDOW_SEC", "60"))
+
 
 def anthropic_key_present() -> bool:
     """True iff an Anthropic key is configured. Never returns the key itself."""

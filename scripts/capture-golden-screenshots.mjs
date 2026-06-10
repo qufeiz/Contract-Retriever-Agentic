@@ -14,6 +14,11 @@ const OUT = resolve(__dirname, "../docs/features/agentic-knowledge-assistant/ima
 mkdirSync(OUT, { recursive: true });
 
 const BASE = process.env.CAPTURE_BASE_URL ?? "http://localhost:3000";
+// The slowest golden query (G-1, the 38-row contract table) is an ~8.5-minute
+// real agent run, so the per-answer wait is configurable. Default 170s suits the
+// faster queries / the public demo; bump it (e.g. 560000) when capturing the
+// heavy G-1 shot against a host without a request-timeout cap.
+const ANSWER_TIMEOUT = Number(process.env.CAPTURE_ANSWER_TIMEOUT ?? 170_000);
 
 // [filename, question, optional post-action ("clickFirstChip")]
 const SHOTS = [
@@ -34,7 +39,7 @@ for (const [file, question, action] of SHOTS) {
   await page.goto(BASE, { waitUntil: "networkidle" });
   await page.getByLabel("Ask a question").fill(question);
   await page.getByRole("button", { name: "Ask" }).click();
-  await page.getByTestId("answer").waitFor({ state: "visible", timeout: 170_000 });
+  await page.getByTestId("answer").waitFor({ state: "visible", timeout: ANSWER_TIMEOUT });
   if (action === "clickFirstChip") {
     const chip = page.locator(".cite").first();
     if (await chip.count()) {

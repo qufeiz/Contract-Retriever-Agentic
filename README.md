@@ -4,7 +4,7 @@ A free-form business question is answered by a **Claude Agent SDK loop** that **
 
 > This is the **agentic re-platforming** of `Contract-Retriever-RAG` (which used a router + hybrid SQL/vector-RAG). Same product, same data, same golden questions, same "Aletheia" citation UX — only the **retrieval engine** changed. It is **not** "upload PDFs into a vector DB and do semantic search" (the client rejected that); this build has **no embeddings at all**. The differentiators: the agent **navigates and reads the real files (visible in the trace)**, **grounded generation**, and **source attribution you can trust**.
 
-- **Live demo:** _the agentic deployment gets its own Vercel project + URL — added when it deploys (the original product stays live + untouched at its own URL)._
+- **Live demo:** **https://aletheia-agentic-demo.vercel.app** (Vercel frontend → a Fly.io agent backend at `https://aletheia-agentic.fly.dev`). The original v1 product stays live + untouched at its own URL.
 - **Architecture + diagram:** [docs/architecture.md](docs/architecture.md)
 - **The feature (design + golden bar + eval gates):** [docs/features/agentic-knowledge-assistant/](docs/features/agentic-knowledge-assistant/README.md)
 
@@ -22,7 +22,8 @@ There is **no router and no vector index** — the agent reads the `data_structu
 ## Stack
 - **Next.js** (App Router) — the copied "Aletheia" UI (citation chips + source panel + agent-trace panel), Vercel-deployable.
 - **Python FastAPI** backend running the **Claude Agent SDK** (`ANTHROPIC_API_KEY`, env-only) — the agent loop + the forked `kb-retriever` skill (English, no LightRAG).
-- Tools: `Read · Glob · Grep · Bash`; extraction via **pandas** (CSV) + **pdftotext/pdfplumber** (PDF). **No embeddings, no SQLite, no bundled index.**
+- Tools: `Read · Glob · Grep · Bash`; extraction via **pandas** (CSV) + **pdftotext/pdfplumber** (PDF). **No embeddings, no SQLite, no bundled index.** On the public deploy the agent is **sandboxed read-only** to the `knowledge/` tree by a `PreToolUse` hook (no writes, no network, no shell escape) — see [04 §Hardening](docs/features/agentic-knowledge-assistant/04-implementation.md#hardening-the-public-surface).
+- **Deploy:** the backend runs in a container ([`Dockerfile`](Dockerfile) + [`fly.toml`](fly.toml): Python + Node + `poppler-utils` + the `claude` CLI) on **Fly.io**; the Next.js UI on **Vercel** proxies to it. The key is a Fly secret, never committed.
 - The **`knowledge/`** tree (CSV + PDF) read-only, with a `data_structure.md` map per directory.
 
 ## Run locally
