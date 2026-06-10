@@ -22,19 +22,26 @@ build looked live and was not.
 
 1. **The Claude Agent SDK swallows the real CLI error.** On a non-zero `claude` exit the SDK raises
    a generic `ProcessError("Command failed with exit code 1 … Check stderr output for details")` and
-   **discards the actual stderr** — so "out of credit", "401 unauthorized", and "malformed prompt"
-   all look identical and tell the operator nothing. The real reason ("Credit balance is too low")
-   is only recoverable via the SDK's **per-line `stderr` callback** (`ClaudeAgentOptions(stderr=…)`);
-   the `ProcessError.stderr` field is just a placeholder.
+   **discards the actual reason** — so "out of credit", "401 unauthorized", and "malformed prompt"
+   all look identical and tell the operator nothing. The `ProcessError.stderr` field is a placeholder.
+   **Worse: the credit/auth message lands on the CLI's STDOUT, not stderr** — verified by running
+   `claude -p` directly in the Fly machine: `Credit balance is too low` went to stdout, stderr was
+   empty. The SDK consumes stdout as a `--output-format stream-json` message stream, so that plain
+   line is unparseable JSON and is **silently dropped**. So the per-line `stderr` callback
+   (`ClaudeAgentOptions(stderr=…)`) catches the auth/quota cases that DO use stderr, but the
+   out-of-credit case needs a **last-resort fallback: a direct `claude -p` probe that reads stdout**
+   (a failing auth/credit call returns instantly and costs nothing — it never reaches the model).
 2. **`/health` checked presence, not validity.** `os.environ` having a key says nothing about whether
    that key can complete a call. Health was green while the product was down.
 
 **Fixes (both in this repo):**
 
-- **Surface the real reason.** `backend/agent.py::answer_question` registers a `stderr` collector,
-  and on `ProcessError` re-raises `RuntimeError(f"agent CLI failed (exit {code}): {real_reason}")`
-  where `_real_stderr()` distils the captured stderr (preferring a credit/auth/quota signal line).
-  The async job's `error` field and the sync `/api/ask` 500 now carry the actionable reason.
+- **Surface the real reason.** `backend/agent.py::answer_question` registers a `stderr` collector
+  and, on `ProcessError`, re-raises `RuntimeError(f"agent CLI failed (exit {code}): {real_reason}")`.
+  `_real_stderr()` distils captured stderr (preferring a credit/auth/quota signal line); when stderr
+  is empty (the out-of-credit case), `_probe_cli_failure_reason()` runs one direct `claude -p` and
+  reads its **stdout** for the real line. The async job's `error` field and the sync `/api/ask` 500
+  now carry the actionable reason.
 - **A real readiness probe.** `backend/agent.py::probe_agent_ready` runs ONE minimal no-tool agent
   turn; `GET /ready` returns `200 {ready:true}` only when it completes, else `503 {ready:false,
   reason:"…"}`. **"Declare live" must gate on a real golden completing end-to-end + `/ready:true`,

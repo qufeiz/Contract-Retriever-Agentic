@@ -462,21 +462,49 @@ async def _single_message_stream(question: str):
 OnTrace = Callable[[TraceStep], Awaitable[None]]
 
 
-def _real_stderr(lines: list[str], limit: int = 400) -> str:
-    """Distil the CLI's captured stderr into the one-glance reason it died.
+_SIGNAL = ("credit", "balance", "401", "403", "unauthor", "forbidden", "invalid",
+           "api key", "api_key", "quota", "rate limit", "overloaded", "authentication")
 
-    The SDK throws away the real stderr (placeholder "Check stderr output for details"), so we
+
+def _real_stderr(lines: list[str], limit: int = 400) -> str:
+    """Distil captured CLI output into the one-glance reason it died.
+
+    The SDK throws away the real text (placeholder "Check stderr output for details"), so we
     collect it ourselves. The CLI is chatty (version notices, debug lines), so prefer the lines
     that name a real fault — credit/auth/quota/rate — and fall back to the last non-empty line.
     """
     cleaned = [ln.strip() for ln in lines if ln and ln.strip()]
     if not cleaned:
         return ""
-    SIGNAL = ("credit", "balance", "401", "403", "unauthor", "forbidden", "invalid",
-              "api key", "api_key", "quota", "rate limit", "overloaded", "authentication")
-    signal_lines = [ln for ln in cleaned if any(k in ln.lower() for k in SIGNAL)]
+    signal_lines = [ln for ln in cleaned if any(k in ln.lower() for k in _SIGNAL)]
     chosen = signal_lines[-1] if signal_lines else cleaned[-1]
     return chosen[:limit]
+
+
+async def _probe_cli_failure_reason() -> str:
+    """Last-resort recovery of the REAL failure text the SDK couldn't surface.
+
+    On an auth/credit failure the `claude` CLI prints the reason (e.g. "Credit balance is too low")
+    to its STDOUT as plain text, NOT stderr — and the SDK consumes stdout as a JSON message stream,
+    so the unparseable line is silently dropped and only the generic "exit code 1" wrapper survives.
+    A failing auth/credit call returns instantly and costs nothing (it never reaches the model), so
+    when we're otherwise blind we run ONE direct `claude -p` and read its stdout+stderr for the real
+    reason. Best-effort: any failure here just yields "" and the caller keeps the generic message.
+    """
+    import asyncio as _asyncio
+
+    try:
+        proc = await _asyncio.create_subprocess_exec(
+            "claude", "-p", "ok",
+            stdout=_asyncio.subprocess.PIPE,
+            stderr=_asyncio.subprocess.PIPE,
+            cwd=str(PROJECT_ROOT),
+        )
+        out, err = await _asyncio.wait_for(proc.communicate(), timeout=20)
+    except Exception:
+        return ""
+    text = (out.decode(errors="replace") + "\n" + err.decode(errors="replace"))
+    return _real_stderr(text.splitlines())
 
 
 async def probe_agent_ready() -> tuple[bool, str]:
@@ -505,7 +533,8 @@ async def probe_agent_ready() -> tuple[bool, str]:
             if isinstance(message, ResultMessage):
                 saw_result = True
     except ProcessError as e:
-        return False, _real_stderr(stderr_lines) or f"agent CLI failed (exit {e.exit_code})"
+        reason = _real_stderr(stderr_lines) or await _probe_cli_failure_reason()
+        return False, reason or f"agent CLI failed (exit {e.exit_code})"
     except Exception as e:  # any other failure → not ready, surface it
         return False, _real_stderr(stderr_lines) or str(e)
     if not saw_result:
@@ -578,8 +607,9 @@ async def answer_question(
             elif isinstance(message, ResultMessage):
                 result_text = message.result
     except ProcessError as e:
-        # Surface the real reason the CLI died (the SDK hid it behind a placeholder).
-        detail = _real_stderr(stderr_lines) or e.stderr or "no stderr captured"
+        # Surface the real reason the CLI died (the SDK hid it behind a placeholder). The reason
+        # is usually on the CLI's STDOUT, which the SDK ate, so fall back to a direct probe.
+        detail = _real_stderr(stderr_lines) or await _probe_cli_failure_reason() or "no detail captured"
         raise RuntimeError(f"agent CLI failed (exit {e.exit_code}): {detail}") from e
 
     if not result_text:

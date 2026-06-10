@@ -83,3 +83,35 @@ def test_answer_question_surfaces_auth_reason(monkeypatch):
         asyncio.run(agent.answer_question("anything"))
 
     assert "401 unauthorized" in str(ei.value)
+
+
+def test_answer_question_falls_back_to_stdout_probe_when_stderr_empty(monkeypatch):
+    # The real-world case: the credit line goes to the CLI's STDOUT (not stderr), which the SDK
+    # ate — so the per-line stderr callback captures NOTHING and we must fall back to a direct
+    # CLI probe that reads stdout.
+    monkeypatch.setattr(agent, "query", _fake_query_that_dies(""))  # no stderr at all
+
+    async def fake_probe():
+        return "Credit balance is too low"
+
+    monkeypatch.setattr(agent, "_probe_cli_failure_reason", fake_probe)
+
+    with pytest.raises(RuntimeError) as ei:
+        asyncio.run(agent.answer_question("anything"))
+
+    msg = str(ei.value)
+    assert "Credit balance is too low" in msg
+    assert "Check stderr output for details" not in msg
+
+
+def test_probe_agent_ready_reports_real_reason_via_stdout_fallback(monkeypatch):
+    monkeypatch.setattr(agent, "query", _fake_query_that_dies(""))  # stderr empty
+
+    async def fake_probe():
+        return "Credit balance is too low"
+
+    monkeypatch.setattr(agent, "_probe_cli_failure_reason", fake_probe)
+
+    ready, reason = asyncio.run(agent.probe_agent_ready())
+    assert ready is False
+    assert reason == "Credit balance is too low"
