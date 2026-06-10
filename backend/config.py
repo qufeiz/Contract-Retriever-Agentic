@@ -17,7 +17,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 KB_PATH = PROJECT_ROOT / "knowledge"
 
 # Default model: capable + cost-reasonable. Cheap sub-steps can override.
-MODEL = os.environ.get("AGENT_MODEL", "claude-sonnet-4-6")
+MODEL = os.environ.get("AGENT_MODEL", "claude-haiku-4-5")
 
 # Hard ceiling on agent turns so a runaway loop can't bleed cost.
 MAX_TURNS = int(os.environ.get("AGENT_MAX_TURNS", "40"))
