@@ -523,6 +523,13 @@ async def _recover_failure_reason(exc: Exception, stderr_lines: list[str]) -> st
     if captured:
         return captured
     if _OPAQUE_WRAPPER in str(exc).lower():
+        # Let the SDK's just-failed child process fully reap before we spawn our own — spawning a
+        # subprocess in the same task immediately after the SDK's child failed can silently no-op on
+        # uvicorn's request loop (uvloop) until the prior child is reaped. A short yield makes the
+        # fallback probe reliable on the in-request path (the detached async-job path was already ok).
+        import asyncio as _asyncio
+
+        await _asyncio.sleep(0.2)
         probed = await _probe_cli_failure_reason()
         if probed:
             return probed
