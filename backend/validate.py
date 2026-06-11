@@ -34,8 +34,24 @@ PRINTED_PAGE_RE = re.compile(r"PAGE\s+(\d+)", re.IGNORECASE)
 
 
 def extract_tokens(answer: str) -> list[tuple[str, str]]:
-    """Return [(file, loc), ...] for every [F:file#loc] in the prose."""
-    return [(m.group(1), m.group(2)) for m in TOKEN_RE.finditer(answer)]
+    """Return [(file, loc), ...] for every [F:file#loc] in the prose.
+
+    A single token sometimes BUNDLES several locators the agent combined into one cite, e.g.
+    `[F:customers.xlsx#row-2, #row-3, #row-4]`. Split those into separate (file, loc) pairs so each
+    is validated independently — a bundled cite is still fully grounded, and a fabricated row inside
+    it still fails. Split ONLY when every comma-part is a simple ordinal/page locator (`row-N`/`pN`),
+    so a natural-key loc that legitimately contains a comma (`row=Acme, Inc|2026-06-11`) is untouched.
+    """
+    out: list[tuple[str, str]] = []
+    for m in TOKEN_RE.finditer(answer):
+        file, raw = m.group(1), m.group(2)
+        if "," in raw:
+            parts = [p for p in (s.strip().lstrip("#").strip() for s in raw.split(",")) if p]
+            if parts and all(ROWORD_RE.match(p) or PAGE_RE.match(p) for p in parts):
+                out.extend((file, p) for p in parts)
+                continue
+        out.append((file, raw))
+    return out
 
 
 def _pdf_printed_page_labels(path: Path) -> set[int] | None:

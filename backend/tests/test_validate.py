@@ -50,6 +50,41 @@ def test_token_without_evidence_rejected():
     assert not ok and any("no matching evidence" in r for r in reasons)
 
 
+# --- combined-citation tokens (the live flake: the agent bundled 4 rows into ONE cite) ---
+
+def test_combined_citation_token_splits():
+    a = "Overdue [F:customers.xlsx#row-2, #row-3, #row-4, #row-7] = $18,965.50"
+    assert extract_tokens(a) == [
+        ("customers.xlsx", "row-2"), ("customers.xlsx", "row-3"),
+        ("customers.xlsx", "row-4"), ("customers.xlsx", "row-7"),
+    ]
+
+
+def test_natural_key_with_comma_is_not_split():
+    # a Vendor name containing a comma must NOT be torn into bogus locators
+    a = "[F:school-operations/contracts.csv#row=Acme, Inc|2026-06-11]"
+    assert extract_tokens(a) == [("school-operations/contracts.csv", "row=Acme, Inc|2026-06-11")]
+
+
+def test_combined_token_validates_when_each_row_real_and_backed():
+    # a bundled cite over real, in-bounds, evidence-backed rows -> grounded (the live-bug fix)
+    ans = "Overdue rows [F:school-operations/contracts.csv#row-1, #row-2, #row-3]."
+    ev = [EvidenceItem(file="school-operations/contracts.csv", loc=f"row-{n}") for n in (1, 2, 3)]
+    ok, reasons = validate(ans, ev, KB)
+    assert ok, reasons
+
+
+def test_combined_token_still_rejects_a_fabricated_row():
+    # one bundled row is out of range -> the whole answer still fails (grounding NOT loosened)
+    ans = "[F:school-operations/contracts.csv#row-1, #row-999999]."
+    ev = [
+        EvidenceItem(file="school-operations/contracts.csv", loc="row-1"),
+        EvidenceItem(file="school-operations/contracts.csv", loc="row-999999"),
+    ]
+    ok, reasons = validate(ans, ev, KB)
+    assert not ok and any("999999" in r or "out of range" in r for r in reasons)
+
+
 def test_nonexistent_file_rejected():
     ans = "[F:school-operations/penalties.csv#row-1]"
     ev = [EvidenceItem(file="school-operations/penalties.csv", loc="row-1")]
