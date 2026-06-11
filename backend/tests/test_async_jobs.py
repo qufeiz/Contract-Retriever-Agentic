@@ -54,7 +54,7 @@ async def _drive(monkeypatched_answer):
 
 
 def test_submit_returns_job_id_then_poll_yields_full_contract(monkeypatch):
-    async def fake_answer(question, on_trace=None, session_id=None, model=None):
+    async def fake_answer(question, on_trace=None, session_id=None, model=None, skill=None):
         # emit a couple of live trace steps (the streaming contract)
         if on_trace:
             await on_trace(TraceStep(kind="map", detail="read root map"))
@@ -73,7 +73,7 @@ def test_submit_returns_job_id_then_poll_yields_full_contract(monkeypatch):
 
 
 def test_job_error_is_surfaced_not_swallowed(monkeypatch):
-    async def boom(question, on_trace=None, session_id=None, model=None):
+    async def boom(question, on_trace=None, session_id=None, model=None, skill=None):
         raise RuntimeError("agent exploded")
 
     monkeypatch.setattr(main, "answer_question", boom)

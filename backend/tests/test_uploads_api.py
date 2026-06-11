@@ -79,18 +79,20 @@ def test_session_id_threads_into_answer_question(monkeypatch):
     sid = up.json()["session_id"]
     captured = {}
 
-    async def _fake_answer(question, on_trace=None, session_id=None, model=None):
+    async def _fake_answer(question, on_trace=None, session_id=None, model=None, skill=None):
         captured["question"] = question
         captured["session_id"] = session_id
+        captured["skill"] = skill
         from backend.models import AskResponse, Validation
 
         return AskResponse(question=question, answer="ok", validation=Validation(ok=True))
 
     monkeypatch.setattr(main, "answer_question", _fake_answer)
     try:
-        r = client.post("/api/ask", json={"question": "anything", "session_id": sid})
+        r = client.post("/api/ask", json={"question": "anything", "session_id": sid, "skill": "lean"})
         assert r.status_code == 200, r.text
         assert captured["session_id"] == sid  # threaded through
+        assert captured["skill"] == "lean"  # the UI toggle threads through too
     finally:
         _cleanup(sid)
 
@@ -98,8 +100,9 @@ def test_session_id_threads_into_answer_question(monkeypatch):
 def test_ask_without_session_id_passes_none(monkeypatch):
     captured = {}
 
-    async def _fake_answer(question, on_trace=None, session_id=None, model=None):
+    async def _fake_answer(question, on_trace=None, session_id=None, model=None, skill=None):
         captured["session_id"] = session_id
+        captured["skill"] = skill
         from backend.models import AskResponse, Validation
 
         return AskResponse(question=question, answer="ok", validation=Validation(ok=True))
@@ -108,3 +111,4 @@ def test_ask_without_session_id_passes_none(monkeypatch):
     r = client.post("/api/ask", json={"question": "no uploads"})
     assert r.status_code == 200, r.text
     assert captured["session_id"] is None  # committed-corpus path, unchanged
+    assert captured["skill"] is None  # no toggle in body → None (server KB_SKILL default applies)

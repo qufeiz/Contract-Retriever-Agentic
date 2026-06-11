@@ -29,7 +29,7 @@ from claude_agent_sdk import (
     query,
 )
 
-from backend.config import MAX_QUESTION_CHARS, MAX_TURNS, MODEL, PROJECT_ROOT, KB_PATH
+from backend.config import MAX_QUESTION_CHARS, MAX_TURNS, MODEL, PROJECT_ROOT, KB_PATH, resolve_kb_skill
 from backend.models import AskResponse, EvidenceItem, TraceStep, Validation
 from backend.validate import validate
 
@@ -778,6 +778,7 @@ async def answer_question(
     on_trace: Optional[OnTrace] = None,
     session_id: Optional[str] = None,
     model: Optional[str] = None,
+    skill: Optional[str] = None,
 ) -> AskResponse:
     """Run the agent for one question and return the Aletheia output contract.
 
@@ -794,6 +795,10 @@ async def answer_question(
     UPLOAD path to a stronger model (claude-sonnet-4-6) if Haiku proves unreliable at
     navigating arbitrary uploaded data, while the committed-corpus path stays on Haiku.
     Defaults to the configured MODEL.
+
+    `skill` selects the committed-corpus retrieval skill: "full" (kb-retriever) or "lean"
+    (kb-retriever-lean) — the UI toggle sends this. None falls back to the KB_SKILL env default,
+    then "full". Ignored on the upload path (which uses its own self-contained prompt).
     """
     run_model = model or MODEL
     # Input guard: reject empty / over-long questions before spending an agent run.
@@ -853,7 +858,7 @@ async def answer_question(
         run_options = dict(
             cwd=str(PROJECT_ROOT),
             setting_sources=["project"],   # load .claude/skills from the project
-            skills=["kb-retriever"],
+            skills=[resolve_kb_skill(skill)],  # full -> kb-retriever | lean -> kb-retriever-lean (UI toggle)
             allowed_tools=ALLOWED_TOOLS,
             permission_mode="bypassPermissions",  # the PreToolUse hook is the gate
             hooks={"PreToolUse": [HookMatcher(hooks=[_pre_tool_use])]},

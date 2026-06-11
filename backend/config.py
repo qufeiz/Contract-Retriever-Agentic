@@ -41,6 +41,22 @@ MODEL = os.environ.get("AGENT_MODEL", "claude-haiku-4-5")
 # MODEL (Haiku, for cost). Override with UPLOAD_MODEL. Decided empirically per 01-design's model note.
 UPLOAD_MODEL = os.environ.get("UPLOAD_MODEL", "claude-sonnet-4-6")
 
+# Committed-corpus retrieval skill variant. "full" = kb-retriever (thorough nav; reads the
+# processing references in full). "lean" = kb-retriever-lean (recipe inlined, ~half the
+# per-question prompt, SAME honesty + citation contract). Default stays "full" until the lean
+# variant is answer-validated against the goldens; the ask API's optional `skill` field overrides
+# per run (that's what the UI toggle sends). Only the committed-corpus path uses a skill — the
+# upload path runs its own self-contained prompt.
+KB_SKILLS = {"full": "kb-retriever", "lean": "kb-retriever-lean"}
+
+
+def resolve_kb_skill(variant: str | None) -> str:
+    """Map a skill variant ("full"/"lean") to its `.claude/skills` directory name. Falls back to
+    the KB_SKILL env default, then "full". Unknown/empty/garbage input never crashes a run."""
+    key = (variant or os.environ.get("KB_SKILL") or "full").strip().lower()
+    return KB_SKILLS.get(key, KB_SKILLS["full"])
+
+
 # Hard ceiling on agent turns so a runaway loop can't bleed cost.
 MAX_TURNS = int(os.environ.get("AGENT_MAX_TURNS", "40"))
 

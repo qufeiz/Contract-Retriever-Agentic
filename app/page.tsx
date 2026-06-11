@@ -92,6 +92,10 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export default function Home() {
   const [question, setQuestion] = useState("");
+  // Retrieval-skill toggle: "full" (kb-retriever) vs "lean" (kb-retriever-lean — slimmer prompt,
+  // cheaper/faster, same grounding+citations). Sent on every ask; honored on the committed-corpus
+  // path (the upload path uses its own self-contained prompt).
+  const [skill, setSkill] = useState<"full" | "lean">("full");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<AnswerResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -150,7 +154,7 @@ export default function Home() {
       const submit = await fetch("/api/ask/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(sessionId ? { question: q, session_id: sessionId } : { question: q }),
+        body: JSON.stringify({ question: q, skill, ...(sessionId ? { session_id: sessionId } : {}) }),
       });
       const job = await submit.json();
       if (!submit.ok) throw new Error(job.error ?? "request failed");
@@ -258,6 +262,60 @@ export default function Home() {
           {loading ? <span className="spinner" /> : "Ask"}
         </button>
       </form>
+
+      {/* Retrieval-skill toggle: lean ⇄ full. Lean uses a slimmer skill prompt (cheaper/faster);
+          full is the thorough navigator. Same grounding + citations either way. */}
+      <div
+        className="skill-toggle"
+        role="radiogroup"
+        aria-label="Retrieval skill"
+        data-testid="skill-toggle"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          margin: "10px 2px 0",
+          fontSize: 13,
+          color: "var(--muted, #6b7280)",
+        }}
+      >
+        <span style={{ opacity: 0.8 }}>Retrieval skill:</span>
+        {(["full", "lean"] as const).map((opt) => {
+          const on = skill === opt;
+          return (
+            <button
+              key={opt}
+              type="button"
+              role="radio"
+              aria-checked={on}
+              data-testid={`skill-${opt}`}
+              onClick={() => setSkill(opt)}
+              title={
+                opt === "lean"
+                  ? "Lean: slimmer skill prompt — cheaper & faster, same grounding/citations"
+                  : "Full: thorough navigator — reads the processing references in full"
+              }
+              style={{
+                cursor: "pointer",
+                padding: "3px 12px",
+                borderRadius: 999,
+                border: "1px solid",
+                borderColor: on ? "var(--accent, #b08d57)" : "rgba(0,0,0,0.18)",
+                background: on ? "var(--accent, #b08d57)" : "transparent",
+                color: on ? "#fff" : "inherit",
+                fontWeight: on ? 600 : 400,
+                textTransform: "capitalize",
+                transition: "all .15s ease",
+              }}
+            >
+              {opt}
+            </button>
+          );
+        })}
+        <span style={{ opacity: 0.6, fontSize: 12 }}>
+          {skill === "lean" ? "slimmer prompt — cheaper" : "thorough navigator"}
+        </span>
+      </div>
 
       {/* Live upload: drop your own CSV/PDF/xlsx, then ask a question over them. The agent
           reads the uploaded files (per-session, isolated, read-only) the same way it reads the

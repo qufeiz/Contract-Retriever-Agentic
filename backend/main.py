@@ -123,7 +123,9 @@ def _prune_jobs() -> None:
         _JOBS.pop(jid, None)
 
 
-async def _run_job(job_id: str, question: str, session_id: str | None = None) -> None:
+async def _run_job(
+    job_id: str, question: str, session_id: str | None = None, skill: str | None = None
+) -> None:
     """Background task: run the agent, streaming trace into the job, then store the result."""
     job = _JOBS[job_id]
 
@@ -136,7 +138,7 @@ async def _run_job(job_id: str, question: str, session_id: str | None = None) ->
         # path (no session) keeps the default MODEL.
         model = UPLOAD_MODEL if session_id else None
         resp = await answer_question(
-            question, on_trace=_on_trace, session_id=session_id, model=model
+            question, on_trace=_on_trace, session_id=session_id, model=model, skill=skill
         )
         job.result = resp
         job.trace = list(resp.trace)  # the authoritative final trace
@@ -212,7 +214,9 @@ async def ask(req: AskRequest, request: Request):
         # An upload run (session present) uses the stronger UPLOAD_MODEL; the committed-corpus path
         # keeps the default model. Same policy as the async-job path.
         model = UPLOAD_MODEL if req.session_id else None
-        result = await answer_question(question, session_id=req.session_id, model=model)
+        result = await answer_question(
+            question, session_id=req.session_id, model=model, skill=req.skill
+        )
         return result
     except ValueError as e:  # input guard tripped inside the agent
         return JSONResponse(status_code=400, content={"error": str(e)})
@@ -235,7 +239,7 @@ async def submit_job(req: AskRequest, request: Request):
     job_id = uuid.uuid4().hex
     _JOBS[job_id] = Job()
     # Fire-and-forget; the task streams trace into the job and stores the result.
-    asyncio.create_task(_run_job(job_id, question, session_id=req.session_id))
+    asyncio.create_task(_run_job(job_id, question, session_id=req.session_id, skill=req.skill))
     return JSONResponse(status_code=202, content={"job_id": job_id, "status": "running"})
 
 
