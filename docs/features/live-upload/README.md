@@ -18,6 +18,8 @@ One row per capability → its golden screenshot (captured by the Engineer from 
 | A citation chip resolves to the real uploaded CSV row / contract page | `images/u1-citation-resolves.png` | eval `U-1` (validate against the session uploads root) |
 | Honest absence on uploaded data: only the CSV uploaded (no contract) → lists overdue customers, **refuses the penalty rate** ("not available", cites the column set), fabricates nothing | `images/u2-honest-absence.png` | eval `U-2-absent` |
 | Per-session isolation + injection-inert (hardening survives uploads) | — (proven by tests, not a screenshot) | `backend/tests/test_hardening.py` (two-session deny, injection-inside-a-file inert, escapes) |
+| Cost-lean **retrieval-skill toggle** (full ⇄ lean) renders, defaults to full, and flips | `images/skill-toggle.png` | journey `skill-toggle.spec.ts` (render + `aria-checked` flip) + unit `test_skill_select.py` |
+| The **lean** variant selected in the toggle (slimmer kb-retriever-lean prompt) — UI→wire | `images/skill-toggle-lean.png` | journey `skill-toggle.spec.ts` (`skill:"lean"` sent on the ask). NOTE: proves the SWITCH; the lean skill's answer quality is the cap-blocked live eval. |
 
 **Golden facts pinned at `asOfDate=2026-06-09`** (independently re-derived in `02`): overdue invoices **4** (rows 2,3,4,7), overdue customers **3**, total overdue **$18,965.50**; the only **>30-day** (suspension-eligible) invoice is **Contoso INV-1055 (51 days)**; the suspension clause is **§4.3 on printed PAGE 3**. The trap rows (paid-but-past-due, due-today, future-due) must **not** be cited as overdue.
 
