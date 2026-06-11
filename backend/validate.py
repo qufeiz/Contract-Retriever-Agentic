@@ -68,7 +68,18 @@ def _csv_rowkeys(path: Path) -> tuple[set[str], int] | None:
 
     The natural key is `<Vendor>|<EndDate>` built from the `Vendor` + `End Date` columns when both
     exist (contracts.csv); otherwise an empty key set with just the row count (ordinal fallback).
+
+    An uploaded .xlsx has no CSV text form, so its data-row count is read via pandas (ordinal-only —
+    uploaded customer data has no Vendor|End Date natural key). Needs openpyxl at runtime.
     """
+    if path.suffix.lower() in (".xlsx", ".xls"):
+        try:
+            import pandas as pd
+
+            df = pd.read_excel(path, sheet_name=0, dtype=str)
+            return set(), int(len(df))
+        except Exception:
+            return None
     try:
         import csv as _csv
 

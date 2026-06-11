@@ -601,6 +601,14 @@ async def _pre_tool_use(input_data: dict, tool_use_id, context):
     if name in ("Skill", "TodoWrite"):
         return {}
 
+    # The constrained UPLOAD-path data-reader tools (mcp__data__*) are scoped BY CONSTRUCTION —
+    # each resolves its target against ONLY the session run dir + knowledge/ and refuses any
+    # absolute / parent / foreign-session path (backend/upload_tools.py). They ARE the boundary,
+    # so the hook must ALLOW them; the old fall-through `_deny` denied them and broke the upload
+    # path entirely (the agent reported "permission issues accessing the data reader tools").
+    if name.startswith("mcp__data__"):
+        return {}
+
     if name == "Read":
         path = str(ti.get("file_path") or ti.get("path") or "")
         if _path_in_kb(path):
@@ -779,6 +787,7 @@ async def answer_question(
     session_id: Optional[str] = None,
     model: Optional[str] = None,
     skill: Optional[str] = None,
+    stats: Optional[dict] = None,
 ) -> AskResponse:
     """Run the agent for one question and return the Aletheia output contract.
 
@@ -842,6 +851,11 @@ async def answer_question(
         run_options = dict(
             cwd=str(PROJECT_ROOT),
             mcp_servers={"data": build_upload_tools_server()},
+            # NO built-in tools at all — only the scoped mcp__data__ readers below. This both
+            # HARDENS (the agent has zero raw FS tools) AND keeps the tool list tiny, so the CLI
+            # presents the readers INLINE instead of deferring them behind ToolSearch — the deferral
+            # broke the upload path (the agent couldn't load/call the deferred mcp__data__ tools).
+            tools=[],
             allowed_tools=UPLOAD_ALLOWED_TOOLS,          # ONLY the scoped readers
             disallowed_tools=["Read", "Bash", "Glob", "Grep", "Write", "Edit",
                               "WebFetch", "WebSearch", "Task", "Agent", "NotebookEdit"],
@@ -904,6 +918,12 @@ async def answer_question(
                             await _emit(TraceStep(kind="note", detail=f"reasoning: {t[:200]}"))
             elif isinstance(message, ResultMessage):
                 result_text = message.result
+                if stats is not None:  # optional per-run cost/usage capture (cost observability)
+                    stats["total_cost_usd"] = getattr(message, "total_cost_usd", None)
+                    stats["usage"] = getattr(message, "usage", None)
+                    stats["num_turns"] = getattr(message, "num_turns", None)
+                    stats["duration_ms"] = getattr(message, "duration_ms", None)
+                    stats["model"] = run_model
     except ValueError:
         raise  # input-guard errors are intentional — let them propagate as-is
     except Exception as e:

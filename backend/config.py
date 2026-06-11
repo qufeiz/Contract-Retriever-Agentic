@@ -33,13 +33,15 @@ UPLOAD_RUN_DIR = (PROJECT_ROOT / ".runs").resolve()
 # Default model: capable + cost-reasonable. Cheap sub-steps can override.
 MODEL = os.environ.get("AGENT_MODEL", "claude-haiku-4-5")
 
-# Model for the LIVE-UPLOAD path specifically. Navigating ARBITRARY uploaded data (unknown
-# columns, an unfamiliar contract) is harder than the known committed corpus, and Haiku proved
-# unreliable on it — it repeatedly cited uploaded-CSV rows OFF BY ONE (counting the header),
-# pointing citations at the wrong row, while Sonnet produced the exact golden (rows 2/3/4/7,
-# $18,965.50, §4.3#p3). So the upload path defaults to Sonnet; the committed-corpus path stays on
-# MODEL (Haiku, for cost). Override with UPLOAD_MODEL. Decided empirically per 01-design's model note.
-UPLOAD_MODEL = os.environ.get("UPLOAD_MODEL", "claude-sonnet-4-6")
+# Model for the LIVE-UPLOAD path. Haiku ORIGINALLY mis-cited uploaded-CSV rows off by one (it
+# counted the header) — which is why this once defaulted to Sonnet. The constrained `read_csv` tool
+# now returns rows ALREADY NUMBERED (`#row-N`), so the model no longer counts; and once the mcp
+# tool-call incompatibility was fixed (see requirements.txt), Haiku produced the EXACT upload golden
+# on a real run — 3 customers / 4 invoices / $18,965.50, Contoso (51d), §4.3 cited to p3, rows 2/3/4/7
+# — at ~1/3 the Sonnet cost (~$0.11 vs ~$0.34). So the upload path now defaults to Haiku too.
+# (Validated on one run, not the full N>=5 robustness sweep; set UPLOAD_MODEL=claude-sonnet-4-6 to
+# escalate if a particular client's data proves harder.)
+UPLOAD_MODEL = os.environ.get("UPLOAD_MODEL", "claude-haiku-4-5")
 
 # Committed-corpus retrieval skill variant. "full" = kb-retriever (thorough nav; reads the
 # processing references in full). "lean" = kb-retriever-lean (recipe inlined, ~half the
