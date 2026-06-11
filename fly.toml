@@ -13,9 +13,11 @@ primary_region = "iad"
 [env]
   PORT = "8080"
   AGENT_MODEL = "claude-haiku-4-5"
-  # The live-upload path escalates to Sonnet (Haiku mis-cited uploaded CSV rows off by one); the
-  # committed-corpus path stays on AGENT_MODEL above.
-  UPLOAD_MODEL = "claude-sonnet-4-6"
+  # Upload path now on Haiku too: the constrained read_csv tool returns rows pre-numbered (#row-N),
+  # so the model no longer counts (the old off-by-one cause), and Haiku produced the EXACT upload
+  # golden on a real run (~$0.11 vs ~$0.34 Sonnet). Committed-corpus path also on AGENT_MODEL above.
+  # Set this back to "claude-sonnet-4-6" only if a specific client's data proves harder.
+  UPLOAD_MODEL = "claude-haiku-4-5"
   AGENT_MAX_TURNS = "40"
   # CORS is set to the Vercel demo origin via the ALLOWED_ORIGINS secret/env at deploy.
 
