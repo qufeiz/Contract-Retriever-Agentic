@@ -13,6 +13,13 @@ from pydantic import BaseModel, Field
 
 class AskRequest(BaseModel):
     question: str
+    # Optional live-upload session: when present, the agent run is scoped to ALSO read
+    # that session's uploaded files (in addition to the committed knowledge/ tree). Absent
+    # → the committed-corpus path, unchanged.
+    session_id: str | None = None
+    # Committed-corpus retrieval skill variant the UI toggle selects: "full" (kb-retriever) or
+    # "lean" (kb-retriever-lean). None → the server's KB_SKILL default. Ignored on the upload path.
+    skill: str | None = None
 
 
 class EvidenceItem(BaseModel):

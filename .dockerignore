@@ -1,6 +1,8 @@
 # Keep the Fly build context lean + never ship secrets or local state.
 .env
 .env*.local
+uploads/
+.runs/
 .venv/
 node_modules/
 .next/

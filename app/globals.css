@@ -371,6 +371,51 @@ header.masthead { margin-bottom: 30px; }
 /* RTL support for Hebrew answers */
 [dir="rtl"] .answer { text-align: right; }
 
+/* ── Live upload ─────────────────────────────────────────────────────────── */
+.upload-zone { margin: 14px 0 4px; }
+.dropzone {
+  border: 1.5px dashed var(--rule-strong);
+  border-radius: var(--radius-sm);
+  background: var(--paper-2);
+  padding: 16px 18px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+.dropzone:hover { border-color: var(--accent); }
+.dropzone.over { border-color: var(--accent); background: rgba(31, 78, 95, 0.06); box-shadow: 0 0 0 4px rgba(31, 78, 95, 0.08); }
+.dropzone.has-files { border-style: solid; border-color: var(--rule); background: var(--card); }
+.dz-line { display: flex; align-items: center; gap: 10px; font-size: 15px; color: var(--ink-soft); line-height: 1.4; }
+.dz-line b { color: var(--ink); font-weight: 600; }
+
+.uploaded-files {
+  margin-top: 10px;
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+}
+.uf-head {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  font-size: 14px; color: var(--ink-soft); margin-bottom: 8px;
+}
+.uf-clear {
+  background: none; border: none; cursor: pointer;
+  font-family: var(--font-mono); font-size: 12px; color: var(--accent-warm);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.uf-clear:hover { text-decoration: underline; }
+.uploaded-files ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.uf {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 6px 10px; border-radius: 7px; background: var(--paper-2);
+  border-left: 3px solid var(--rule-strong);
+}
+.uf.csv, .uf.xlsx { border-left-color: var(--sql); }
+.uf.pdf { border-left-color: var(--pdf); }
+.uf-name { font-family: var(--font-mono); font-size: 13px; color: var(--ink); }
+.uf-meta { font-size: 12.5px; color: var(--ink-faint); }
+.upload-zone .err { color: var(--bad); font-size: 14px; margin: 8px 2px 0; }
+
 @media (max-width: 560px) {
   .wrap { padding: 28px 16px 80px; }
   body { font-size: 16px; }

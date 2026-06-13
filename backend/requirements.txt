@@ -1,10 +1,17 @@
 fastapi==0.115.0
-uvicorn[standard]==0.30.0
-claude-agent-sdk>=0.1.0
+uvicorn[standard]>=0.49.0  # bumped with mcp 1.27.2 (verified-working set)
+python-multipart==0.0.32  # FastAPI multipart/form-data uploads (/api/uploads)
+claude-agent-sdk==0.1.69
+# mcp MUST be a version whose call_tool accepts a CallToolResult return. claude-agent-sdk 0.1.69's
+# in-process MCP adapter returns a CallToolResult; mcp 1.12.4 mis-iterated it into "20 validation
+# errors for CallToolResult" and broke the ENTIRE upload tool path. Pinned to a verified-working
+# pair (1.27.2 adds `isinstance(results, CallToolResult)` handling). Bump both together + re-verify.
+mcp==1.27.2
 pydantic>=2.0
 pdfplumber>=0.11.0
 pandas>=2.2.0
+openpyxl>=3.1.0  # read uploaded .xlsx via pandas (read_excel) — the Excel upload path + validate
 python-dotenv==1.0.0
 pytest==8.3.0
 pytest-asyncio==0.24.0
-httpx==0.27.0
+httpx>=0.28.1  # mcp 1.27.2 requires httpx>=0.28 (old ==0.27.0 made the build ResolutionImpossible)

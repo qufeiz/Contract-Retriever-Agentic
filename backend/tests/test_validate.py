@@ -50,6 +50,41 @@ def test_token_without_evidence_rejected():
     assert not ok and any("no matching evidence" in r for r in reasons)
 
 
+# --- combined-citation tokens (the live flake: the agent bundled 4 rows into ONE cite) ---
+
+def test_combined_citation_token_splits():
+    a = "Overdue [F:customers.xlsx#row-2, #row-3, #row-4, #row-7] = $18,965.50"
+    assert extract_tokens(a) == [
+        ("customers.xlsx", "row-2"), ("customers.xlsx", "row-3"),
+        ("customers.xlsx", "row-4"), ("customers.xlsx", "row-7"),
+    ]
+
+
+def test_natural_key_with_comma_is_not_split():
+    # a Vendor name containing a comma must NOT be torn into bogus locators
+    a = "[F:school-operations/contracts.csv#row=Acme, Inc|2026-06-11]"
+    assert extract_tokens(a) == [("school-operations/contracts.csv", "row=Acme, Inc|2026-06-11")]
+
+
+def test_combined_token_validates_when_each_row_real_and_backed():
+    # a bundled cite over real, in-bounds, evidence-backed rows -> grounded (the live-bug fix)
+    ans = "Overdue rows [F:school-operations/contracts.csv#row-1, #row-2, #row-3]."
+    ev = [EvidenceItem(file="school-operations/contracts.csv", loc=f"row-{n}") for n in (1, 2, 3)]
+    ok, reasons = validate(ans, ev, KB)
+    assert ok, reasons
+
+
+def test_combined_token_still_rejects_a_fabricated_row():
+    # one bundled row is out of range -> the whole answer still fails (grounding NOT loosened)
+    ans = "[F:school-operations/contracts.csv#row-1, #row-999999]."
+    ev = [
+        EvidenceItem(file="school-operations/contracts.csv", loc="row-1"),
+        EvidenceItem(file="school-operations/contracts.csv", loc="row-999999"),
+    ]
+    ok, reasons = validate(ans, ev, KB)
+    assert not ok and any("999999" in r or "out of range" in r for r in reasons)
+
+
 def test_nonexistent_file_rejected():
     ans = "[F:school-operations/penalties.csv#row-1]"
     ev = [EvidenceItem(file="school-operations/penalties.csv", loc="row-1")]
@@ -61,3 +96,78 @@ def test_honest_refusal_with_no_tokens_passes():
     ans = "Penalty terms are not available — contracts.csv has no penalty column."
     ok, reasons = validate(ans, [], KB)
     assert ok, reasons  # an answer that makes no cited claims is valid
+
+
+# ── Live-upload: citations resolve against a per-session uploads root ───────────
+import shutil
+import tempfile
+from pathlib import Path as _Path
+
+FIXTURES = _Path(__file__).resolve().parents[2] / "docs" / "features" / "live-upload" / "fixtures"
+
+
+def _session_root_with_fixtures(tmp: _Path) -> _Path:
+    """A fake session uploads root holding the two fixtures, like the runtime store."""
+    shutil.copy(FIXTURES / "customers.csv", tmp / "customers.csv")
+    shutil.copy(FIXTURES / "service-agreement.pdf", tmp / "service-agreement.pdf")
+    return tmp
+
+
+def test_uploaded_csv_ordinal_row_resolves():
+    tmp = _Path(tempfile.mkdtemp())
+    try:
+        root = _session_root_with_fixtures(tmp)
+        ans = "Contoso is overdue [F:customers.csv#row-3]."
+        ev = [EvidenceItem(file="customers.csv", loc="row-3", snippet="Contoso")]
+        ok, reasons = validate(ans, ev, [root, KB])  # session root FIRST, then knowledge/
+        assert ok, reasons
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_uploaded_csv_out_of_range_row_rejected():
+    tmp = _Path(tempfile.mkdtemp())
+    try:
+        root = _session_root_with_fixtures(tmp)
+        ans = "[F:customers.csv#row-99]"  # 10-row file
+        ev = [EvidenceItem(file="customers.csv", loc="row-99")]
+        ok, reasons = validate(ans, ev, [root, KB])
+        assert not ok and any("out of range" in r for r in reasons)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_uploaded_pdf_printed_page_resolves_and_invented_page_rejected():
+    tmp = _Path(tempfile.mkdtemp())
+    try:
+        root = _session_root_with_fixtures(tmp)
+        good = "Suspension clause [F:service-agreement.pdf#p3]."
+        ev = [EvidenceItem(file="service-agreement.pdf", loc="p3", snippet="4.3")]
+        ok, reasons = validate(good, ev, [root, KB])
+        assert ok, reasons
+        bad = "[F:service-agreement.pdf#p9]"  # no printed PAGE 9
+        evb = [EvidenceItem(file="service-agreement.pdf", loc="p9")]
+        okb, rb = validate(bad, evb, [root, KB])
+        assert not okb and any("not a printed PAGE label" in r for r in rb)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_mixed_roots_knowledge_and_upload_both_resolve():
+    """A composed cross-source answer cites BOTH an uploaded file and (hypothetically) a knowledge
+    file — each must resolve against its own root."""
+    tmp = _Path(tempfile.mkdtemp())
+    try:
+        root = _session_root_with_fixtures(tmp)
+        ans = (
+            "Overdue [F:customers.csv#row-3]; the case judgment "
+            "[F:carter-case/family-court-case-file.pdf#p24]."
+        )
+        ev = [
+            EvidenceItem(file="customers.csv", loc="row-3"),
+            EvidenceItem(file="carter-case/family-court-case-file.pdf", loc="p24"),
+        ]
+        ok, reasons = validate(ans, ev, [root, KB])
+        assert ok, reasons
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

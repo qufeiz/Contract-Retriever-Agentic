@@ -34,8 +34,24 @@ PRINTED_PAGE_RE = re.compile(r"PAGE\s+(\d+)", re.IGNORECASE)
 
 
 def extract_tokens(answer: str) -> list[tuple[str, str]]:
-    """Return [(file, loc), ...] for every [F:file#loc] in the prose."""
-    return [(m.group(1), m.group(2)) for m in TOKEN_RE.finditer(answer)]
+    """Return [(file, loc), ...] for every [F:file#loc] in the prose.
+
+    A single token sometimes BUNDLES several locators the agent combined into one cite, e.g.
+    `[F:customers.xlsx#row-2, #row-3, #row-4]`. Split those into separate (file, loc) pairs so each
+    is validated independently — a bundled cite is still fully grounded, and a fabricated row inside
+    it still fails. Split ONLY when every comma-part is a simple ordinal/page locator (`row-N`/`pN`),
+    so a natural-key loc that legitimately contains a comma (`row=Acme, Inc|2026-06-11`) is untouched.
+    """
+    out: list[tuple[str, str]] = []
+    for m in TOKEN_RE.finditer(answer):
+        file, raw = m.group(1), m.group(2)
+        if "," in raw:
+            parts = [p for p in (s.strip().lstrip("#").strip() for s in raw.split(",")) if p]
+            if parts and all(ROWORD_RE.match(p) or PAGE_RE.match(p) for p in parts):
+                out.extend((file, p) for p in parts)
+                continue
+        out.append((file, raw))
+    return out
 
 
 def _pdf_printed_page_labels(path: Path) -> set[int] | None:
@@ -68,7 +84,18 @@ def _csv_rowkeys(path: Path) -> tuple[set[str], int] | None:
 
     The natural key is `<Vendor>|<EndDate>` built from the `Vendor` + `End Date` columns when both
     exist (contracts.csv); otherwise an empty key set with just the row count (ordinal fallback).
+
+    An uploaded .xlsx has no CSV text form, so its data-row count is read via pandas (ordinal-only —
+    uploaded customer data has no Vendor|End Date natural key). Needs openpyxl at runtime.
     """
+    if path.suffix.lower() in (".xlsx", ".xls"):
+        try:
+            import pandas as pd
+
+            df = pd.read_excel(path, sheet_name=0, dtype=str)
+            return set(), int(len(df))
+        except Exception:
+            return None
     try:
         import csv as _csv
 
@@ -109,11 +136,43 @@ def _norm_rowkey(raw: str) -> str:
     return raw.strip()
 
 
+def _resolve_under_roots(file: str, roots: list[Path]) -> tuple[Path | None, str | None]:
+    """Resolve a cited `file` under the FIRST allowed root that contains it.
+
+    Returns (resolved_path, None) on success, or (None, reason) when the file
+    either escapes every root (a `..`/absolute path that climbs out) or does not
+    exist under any. The roots are tried in order; for the live-upload feature the
+    caller passes [session_uploads_root, knowledge_root] so an uploaded-file
+    citation (e.g. `customers.csv`) resolves against the session dir while a
+    `knowledge/...` citation still resolves against the committed tree.
+    """
+    escaped_all = True
+    for root in roots:
+        root_r = root.resolve()
+        full = (root_r / file).resolve()
+        if not str(full).startswith(str(root_r)):
+            continue  # escapes THIS root — try the next
+        escaped_all = False
+        if full.exists():
+            return full, None
+    if escaped_all:
+        return None, f"cited file escapes the allowed roots: {file}"
+    return None, f"cited file does not exist: {file}"
+
+
 def validate(
     answer: str,
     evidence: list[EvidenceItem],
-    kb_root: Path,
+    kb_root: Path | list[Path],
 ) -> tuple[bool, list[str]]:
+    """Validate every [F:file#loc] token against one or more allowed source roots.
+
+    `kb_root` is a single Path (the committed knowledge/ tree — the original,
+    unchanged behavior) OR a list of roots (the live-upload path: the per-session
+    uploads root FIRST, then knowledge/). A token resolves if the cited file exists
+    under one of the roots and the page/row is in bounds there.
+    """
+    roots = kb_root if isinstance(kb_root, list) else [kb_root]
     reasons: list[str] = []
     tokens = extract_tokens(answer)
 
@@ -128,13 +187,10 @@ def validate(
             reasons.append(f"cited [F:{file}#{loc}] has no matching evidence item")
             continue
 
-        # 3. file must exist under the knowledge tree
-        full = (kb_root / file).resolve()
-        if not str(full).startswith(str(kb_root.resolve())):
-            reasons.append(f"cited file escapes knowledge root: {file}")
-            continue
-        if not full.exists():
-            reasons.append(f"cited file does not exist: {file}")
+        # 3. file must exist under one of the allowed roots
+        full, reason = _resolve_under_roots(file, roots)
+        if full is None:
+            reasons.append(reason or f"cited file does not exist: {file}")
             continue
 
         # 4. bounds-check the locator
